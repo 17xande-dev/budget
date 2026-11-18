@@ -30,6 +30,12 @@ servers:
 # Cloudflare terminates TLS and the shared tunnel forwards the hostname to
 # http://kamal-proxy:80, so kamal-proxy serves plain http and asks for no cert.
 proxy:
+  run:
+    # Pinned: Kamal defaults to v0.9.2. A running proxy is not swapped by `kamal deploy`;
+    # `kamal proxy reboot` (brief outage) applies a change here. `publish: false` replaces
+    # the old `kamal proxy boot_config set --no-publish`: the tunnel is the only way in.
+    version: v0.10.3
+    publish: false
   ssl: false
   host: budget.17xande.dev
   app_port: 8080
