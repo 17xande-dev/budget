@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -9,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/17xande-dev/password"
 )
 
 // User is someone who can sign in. There are no roles: a household budget has
@@ -33,20 +36,6 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
-// dummyHash is verified against when no user matches, so that an unknown email
-// and a wrong password take the same time. Without it, whether an account exists
-// is readable straight off the response time: a miss returns immediately while a
-// hit spends a tenth of a second in argon2.
-var dummyHash = func() string {
-	h, err := HashPassword("not a real password", DefaultParams)
-	if err != nil {
-		// Only fails on an empty password or incomplete params; neither is
-		// possible here.
-		panic("auth: cannot build dummy hash: " + err.Error())
-	}
-	return h
-}()
-
 const userColumns = `id, email, name, must_change_password, created_at, last_login_at`
 
 func scanUser(row interface{ Scan(...any) error }, extra ...any) (User, error) {
@@ -61,18 +50,18 @@ func scanUser(row interface{ Scan(...any) error }, extra ...any) (User, error) {
 //
 // On success it records the login time, which is what tells you whether an
 // account is still in use.
-func (s *Store) Authenticate(email, password string, now time.Time) (User, bool, error) {
+func (s *Store) Authenticate(ctx context.Context, email, pw string, now time.Time) (User, bool, error) {
 	var hash string
 	u, err := scanUser(s.db.QueryRow(`SELECT `+userColumns+`, password_hash FROM users WHERE email = ?`, email), &hash)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// Spend the same time as a real verification before answering.
-		CheckPassword(dummyHash, password)
+		_, _ = password.CheckDummy(ctx, pw)
 		return User{}, false, nil
 	case err != nil:
 		return User{}, false, fmt.Errorf("find user: %w", err)
 	}
-	if !CheckPassword(hash, password) {
+	if !checkPassword(ctx, hash, pw) {
 		return User{}, false, nil
 	}
 	if _, err := s.db.Exec(`UPDATE users SET last_login_at = ? WHERE id = ?`, formatTime(now), u.ID); err != nil {
@@ -108,7 +97,7 @@ func createUser(q execer, email, name, passwordHash string, mustChange bool, now
 	if email == "" {
 		return User{}, errors.New("create user: email must not be empty")
 	}
-	if err := ParsePasswordHash(passwordHash); err != nil {
+	if err := validatePasswordHash(passwordHash); err != nil {
 		return User{}, fmt.Errorf("create user %s: %w", email, err)
 	}
 	res, err := q.Exec(`
@@ -166,7 +155,7 @@ func (s *Store) FindByEmail(email string) (User, bool, error) {
 //
 // Separate from Authenticate because confirming your own password before changing
 // it is not a sign-in, and recording it as one would make last_login_at lie.
-func (s *Store) CheckUserPassword(id int64, password string) (bool, error) {
+func (s *Store) CheckUserPassword(ctx context.Context, id int64, pw string) (bool, error) {
 	var hash string
 	err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, id).Scan(&hash)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -175,7 +164,7 @@ func (s *Store) CheckUserPassword(id int64, password string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read password hash for user %d: %w", id, err)
 	}
-	return CheckPassword(hash, password), nil
+	return checkPassword(ctx, hash, pw), nil
 }
 
 // SetPassword replaces a user's password and deletes all their sessions and API
@@ -184,7 +173,7 @@ func (s *Store) CheckUserPassword(id int64, password string) (bool, error) {
 // The two go together: a password change that left existing sessions alive would
 // not actually shut anyone out, which is the main reason someone changes one.
 func (s *Store) SetPassword(id int64, passwordHash string, mustChange bool) (bool, error) {
-	if err := ParsePasswordHash(passwordHash); err != nil {
+	if err := validatePasswordHash(passwordHash); err != nil {
 		return false, fmt.Errorf("set password for user %d: %w", id, err)
 	}
 	tx, err := s.db.Begin()

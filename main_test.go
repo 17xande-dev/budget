@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,7 +12,13 @@ import (
 
 	"github.com/17xande-dev/budget/internal/auth"
 	"github.com/17xande-dev/budget/internal/db"
+	"github.com/17xande-dev/password"
 )
+
+func TestMain(m *testing.M) {
+	password.SetParamsForTesting(password.Params{Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
+	os.Exit(m.Run())
+}
 
 func newStore(t *testing.T) *auth.Store {
 	t.Helper()
@@ -63,7 +70,10 @@ func TestEnsureSetupTokenWarnsOnMismatchedSupplied(t *testing.T) {
 
 func TestEnsureSetupTokenSilentOnceClaimed(t *testing.T) {
 	s := newStore(t)
-	h, _ := auth.HashPassword("correct horse battery", auth.Params{Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
+	h, err := auth.HashPassword(t.Context(), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.CreateUser("a@example.com", "A", h, false, time.Now())
 	var buf bytes.Buffer
 	ensureSetupToken(s, "", log.New(&buf, "", 0))
@@ -74,7 +84,10 @@ func TestEnsureSetupTokenSilentOnceClaimed(t *testing.T) {
 
 func TestResetPassword(t *testing.T) {
 	s := newStore(t)
-	h, _ := auth.HashPassword("the old passphrase", auth.Params{Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
+	h, err := auth.HashPassword(t.Context(), "the old passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
 	u, _ := s.CreateUser("a@example.com", "A", h, true, time.Now())
 	tok, _ := s.IssueSession(u.ID, time.Now(), time.Hour)
 
@@ -82,7 +95,7 @@ func TestResetPassword(t *testing.T) {
 	if err := resetPassword(s, "A@example.com", strings.NewReader("a brand new passphrase\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	got, ok, _ := s.Authenticate("a@example.com", "a brand new passphrase", time.Now())
+	got, ok, _ := s.Authenticate(t.Context(), "a@example.com", "a brand new passphrase", time.Now())
 	if !ok {
 		t.Fatal("new password does not work")
 	}

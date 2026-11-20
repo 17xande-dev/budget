@@ -23,11 +23,15 @@ import (
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/mcpserver"
 	"github.com/17xande-dev/budget/internal/middleware"
+	"github.com/17xande-dev/password"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/time/rate"
 )
 
-var cheap = auth.Params{Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}
+func TestMain(m *testing.M) {
+	password.SetParamsForTesting(password.Params{Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
+	os.Exit(m.Run())
+}
 
 type fixture struct {
 	t      *testing.T
@@ -60,7 +64,10 @@ func newFixture(t *testing.T) *fixture {
 	f.srv = httptest.NewServer(h.Server(middleware.RequireUser(f.users), limit, f.mcp.Handler()))
 	t.Cleanup(f.srv.Close)
 
-	pw, _ := auth.HashPassword("correct horse battery", cheap)
+	pw, err := auth.HashPassword(t.Context(), "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.user, _ = f.users.CreateUser("alex@example.com", "Alex", pw, false, time.Now())
 	f.token, _, err = f.users.IssueAPIToken(f.user.ID, "laptop", time.Hour, time.Now())
 	if err != nil {
@@ -197,7 +204,10 @@ func TestRevokedAndPasswordChangedTokensStop(t *testing.T) {
 	if msg := call(t, s, "list_accounts", nil, nil); msg != "" {
 		t.Fatalf("before: %s", msg)
 	}
-	pw, _ := auth.HashPassword("a different passphrase", cheap)
+	pw, err := auth.HashPassword(t.Context(), "a different passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.users.SetPassword(f.user.ID, pw, false)
 	if code := f.rawInitialize(http.Header{"Authorization": {"Bearer " + f.token}}); code != http.StatusUnauthorized {
 		t.Fatalf("token after a password change: %d, want 401", code)

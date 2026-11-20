@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -42,7 +43,7 @@ func resetPassword(store *auth.Store, email string, in io.Reader, out io.Writer)
 		return errors.New(msg)
 	}
 
-	hash, err := auth.HashPassword(password, auth.DefaultParams)
+	hash, err := auth.HashPassword(context.Background(), password)
 	if err != nil {
 		return err
 	}

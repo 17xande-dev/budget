@@ -159,7 +159,7 @@ dependency, and why:
 | Dependency | For | Why not the alternative |
 |---|---|---|
 | `modernc.org/sqlite` | SQLite driver | Pure Go, so `CGO_ENABLED=0` and a distroless/static image with no libc or shell. `mattn/go-sqlite3` is smaller and canonical, but needs cgo and an Alpine-class runtime. modernc is a large machine-translated module; accepted for the static image, which matters more here because the container will hold bank credentials. |
-| `golang.org/x/crypto` | argon2id | Password hashing is not something to hand-roll. |
+| `github.com/17xande-dev/password` | Argon2id password hashing | Shares hash validation and the concurrency limiter across apps. |
 | `justinas/nosurf` | CSRF tokens and origin checks | Same. |
 | `golang.org/x/time/rate` | token buckets for the rate limits | Small, from the Go team. |
 | `chromedp/chromedp` (+ `chromedp/remote`) | driving headless Chrome for the FNB login (phase 5) | FNB's login is behind bot protection that only a real browser passes honestly. chromedp's core needs only the stdlib and cdproto; the websocket half is a separate small module. Chosen over hand-rolled CDP. |

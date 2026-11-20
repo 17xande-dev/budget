@@ -71,7 +71,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, ok, err := h.users.Authenticate(email, r.PostFormValue("password"), time.Now())
+	user, ok, err := h.users.Authenticate(r.Context(), email, r.PostFormValue("password"), time.Now())
 	if err != nil {
 		log.Printf("login: authenticate: %v", err)
 		fail(http.StatusInternalServerError, "Something went wrong signing you in. Please try again.")
@@ -192,7 +192,7 @@ func (h *Handler) SetupClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := auth.HashPassword(password, auth.DefaultParams)
+	hash, err := auth.HashPassword(r.Context(), password)
 	if err != nil {
 		log.Printf("setup: hash password: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)

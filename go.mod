@@ -3,11 +3,11 @@ module github.com/17xande-dev/budget
 go 1.27.4
 
 require (
+	github.com/17xande-dev/password v0.1.0
 	github.com/chromedp/cdproto v0.160.5
 	github.com/chromedp/chromedp v0.24.0
 	github.com/justinas/nosurf v1.2.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	golang.org/x/crypto v0.59.0
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.62.0
 )
@@ -23,6 +23,7 @@ require (
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/oauth2 v0.38.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect

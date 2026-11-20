@@ -92,7 +92,7 @@ func (s *Store) CheckSetupToken(token string) (bool, error) {
 // IMMEDIATE), not because of the SQL -- do not carry this shape to Postgres
 // unchanged.
 func (s *Store) ClaimSetup(token, email, name, passwordHash string, now time.Time) (User, error) {
-	if err := ParsePasswordHash(passwordHash); err != nil {
+	if err := validatePasswordHash(passwordHash); err != nil {
 		return User{}, fmt.Errorf("claim setup: %w", err)
 	}
 	tx, err := s.db.Begin()

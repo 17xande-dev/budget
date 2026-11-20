@@ -56,7 +56,7 @@ func (h *Handler) MemberCreate(w http.ResponseWriter, r *http.Request) {
 		h.renderMembers(w, r, http.StatusUnprocessableEntity, email, name, errs)
 		return
 	}
-	hash, err := auth.HashPassword(password, auth.DefaultParams)
+	hash, err := auth.HashPassword(r.Context(), password)
 	if err != nil {
 		log.Printf("members: hash password: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -106,7 +106,7 @@ func (h *Handler) OwnPasswordChange(w http.ResponseWriter, r *http.Request) {
 		again(http.StatusUnprocessableEntity, errs)
 		return
 	}
-	ok, err := h.users.CheckUserPassword(me.ID, r.PostFormValue("current"))
+	ok, err := h.users.CheckUserPassword(r.Context(), me.ID, r.PostFormValue("current"))
 	if err != nil {
 		log.Printf("password: check current for %d: %v", me.ID, err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -122,7 +122,7 @@ func (h *Handler) OwnPasswordChange(w http.ResponseWriter, r *http.Request) {
 		again(http.StatusUnprocessableEntity, validate.FormErrors{"password": "Choose a password different from the current one."})
 		return
 	}
-	hash, err := auth.HashPassword(password, auth.DefaultParams)
+	hash, err := auth.HashPassword(r.Context(), password)
 	if err != nil {
 		log.Printf("password: hash: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)

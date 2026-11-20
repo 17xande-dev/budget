@@ -27,6 +27,7 @@ import (
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/mcpserver"
 	"github.com/17xande-dev/budget/internal/middleware"
+	"github.com/17xande-dev/password"
 	"golang.org/x/time/rate"
 )
 
@@ -35,6 +36,11 @@ import (
 var version = "dev"
 
 func main() {
+	// The per-IP limiter admits a burst; ten parallel Argon2id logins measured
+	// about 650 MiB against a 512 MiB container. Cap both the server and the
+	// reset-password command at two concurrent hashes; excess callers wait.
+	password.SetConcurrency(2)
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)

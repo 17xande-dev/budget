@@ -2,13 +2,20 @@ package auth_test
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/17xande-dev/budget/internal/auth"
 	"github.com/17xande-dev/budget/internal/db"
+	"github.com/17xande-dev/password"
 )
+
+func TestMain(m *testing.M) {
+	password.SetParamsForTesting(password.Params{Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
+	os.Exit(m.Run())
+}
 
 var t0 = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 
@@ -24,7 +31,7 @@ func newStore(t *testing.T) *auth.Store {
 
 func hash(t *testing.T, pw string) string {
 	t.Helper()
-	h, err := auth.HashPassword(pw, cheapParams)
+	h, err := auth.HashPassword(t.Context(), pw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +44,7 @@ func TestAuthenticate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	u, ok, err := s.Authenticate("alex@example.com", "correct horse battery", t0)
+	u, ok, err := s.Authenticate(t.Context(), "alex@example.com", "correct horse battery", t0)
 	if err != nil || !ok {
 		t.Fatalf("right password refused: ok=%v err=%v", ok, err)
 	}
@@ -46,13 +53,13 @@ func TestAuthenticate(t *testing.T) {
 	}
 	// The column collates NOCASE: the login form must find the account however
 	// the address was capitalised, or one person ends up with two identities.
-	if _, ok, _ := s.Authenticate("ALEX@example.com", "correct horse battery", t0); !ok {
+	if _, ok, _ := s.Authenticate(t.Context(), "ALEX@example.com", "correct horse battery", t0); !ok {
 		t.Error("email lookup is case-sensitive")
 	}
-	if _, ok, _ := s.Authenticate("alex@example.com", "wrong", t0); ok {
+	if _, ok, _ := s.Authenticate(t.Context(), "alex@example.com", "wrong", t0); ok {
 		t.Error("wrong password accepted")
 	}
-	if _, ok, err := s.Authenticate("nobody@example.com", "x", t0); ok || err != nil {
+	if _, ok, err := s.Authenticate(t.Context(), "nobody@example.com", "x", t0); ok || err != nil {
 		t.Errorf("unknown email: ok=%v err=%v", ok, err)
 	}
 }
@@ -72,7 +79,19 @@ func TestCreateUserRefusesDuplicateEmail(t *testing.T) {
 func TestCreateUserRefusesMalformedHash(t *testing.T) {
 	s := newStore(t)
 	if _, err := s.CreateUser("a@example.com", "A", "plaintext", false, t0); err == nil {
-		t.Fatal("a non-argon2 hash was stored: that account could never sign in")
+		t.Fatal("a malformed hash was stored: that account could never sign in")
+	}
+}
+
+func TestCreateUserRefusesBcrypt(t *testing.T) {
+	s := newStore(t)
+	// A valid bcrypt hash is supported by the module but never was by Budget.
+	const bcryptHash = "$2a$10$twjQA8BMDdFuHP3afXoWe.PWv/NGS/A2zpHSrgDmWAVc/fzuPmJ66"
+	if err := password.Validate(bcryptHash); err != nil {
+		t.Fatalf("invalid bcrypt fixture: %v", err)
+	}
+	if _, err := s.CreateUser("a@example.com", "A", bcryptHash, false, t0); err == nil {
+		t.Fatal("bcrypt hash was stored despite Budget's Argon2id-only policy")
 	}
 }
 
@@ -116,7 +135,7 @@ func TestSetPasswordEndsSessions(t *testing.T) {
 	if _, ok, _ := s.VerifySession(tok, t0); ok {
 		t.Error("session survived a password change")
 	}
-	got, ok, _ := s.Authenticate("a@example.com", "a whole new passphrase", t0)
+	got, ok, _ := s.Authenticate(t.Context(), "a@example.com", "a whole new passphrase", t0)
 	if !ok {
 		t.Fatal("new password refused")
 	}
