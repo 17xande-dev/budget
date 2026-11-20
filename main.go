@@ -29,6 +29,7 @@ import (
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/password"
 	"github.com/17xande-dev/ratelimit"
+	"github.com/17xande-dev/ratelimit/clientip"
 	"golang.org/x/time/rate"
 )
 
@@ -113,11 +114,10 @@ func serve(cfg config.Config) error {
 	// One per-IP ceiling for every route that verifies a secret. Generous enough
 	// that a fumbled password or two never trips it; the per-email tier inside
 	// the login handler is the tight one.
-	secretIP, err := ratelimit.New(ratelimit.Config{Rate: rate.Every(10 * time.Second), Burst: 10, IdleTTL: 30 * time.Minute})
+	secretLimit, err := newSecretLimit(cfg.ClientIPSource)
 	if err != nil {
 		return fmt.Errorf("init rate limit: %w", err)
 	}
-	secretLimit := middleware.ByIP(secretIP, cfg.ClientIPSource)
 
 	mcp, err := mcpserver.New(mcpserver.Deps{Users: users, Ledger: led, Budget: bud, ClientIPSource: cfg.ClientIPSource, Version: version})
 	if err != nil {
@@ -196,4 +196,15 @@ func sweepSessions(ctx context.Context, store *auth.Store, every time.Duration) 
 			}
 		}
 	}
+}
+
+// newSecretLimit is the per-IP ceiling for every route that verifies a secret,
+// reading the client address as source says to. Fail-closed: a full table
+// refuses new addresses.
+func newSecretLimit(source clientip.Source) (func(http.Handler) http.Handler, error) {
+	l, err := ratelimit.New(ratelimit.Config{Rate: rate.Every(10 * time.Second), Burst: 10, IdleTTL: 30 * time.Minute})
+	if err != nil {
+		return nil, err
+	}
+	return middleware.ByIP(l, source), nil
 }

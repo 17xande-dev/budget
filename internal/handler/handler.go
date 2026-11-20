@@ -65,7 +65,7 @@ func New(users *auth.Store, led *ledger.Store, bud *budget.Store, cfg Config) (*
 	}
 	var err error
 	// 30 minutes idle, as before: long enough for a bucket to have refilled.
-	if h.loginByEmail, err = ratelimit.New(ratelimit.Config{Rate: rate.Every(time.Minute), Burst: 5, IdleTTL: 30 * time.Minute}); err != nil {
+	if h.loginByEmail, err = newLoginByEmail(); err != nil {
 		return nil, err
 	}
 	if h.assets, err = loadAssets(); err != nil {
@@ -265,4 +265,10 @@ func (h *Handler) sessionCookie(value string, ttl time.Duration) *http.Cookie {
 		c.MaxAge = -1
 	}
 	return c
+}
+
+// newLoginByEmail is the tight per-email tier: five failures, then one more a
+// minute. Fail-closed: a full table refuses unseen addresses.
+func newLoginByEmail() (*ratelimit.Limiter, error) {
+	return ratelimit.New(ratelimit.Config{Rate: rate.Every(time.Minute), Burst: 5, IdleTTL: 30 * time.Minute})
 }

@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/17xande-dev/budget/internal/auth"
+	"github.com/17xande-dev/budget/internal/config"
 	"github.com/17xande-dev/budget/internal/db"
 	"github.com/17xande-dev/password"
 )
@@ -122,5 +125,76 @@ func TestServerCapsHeaders(t *testing.T) {
 	srv := newServer(":0", http.NotFoundHandler())
 	if srv.MaxHeaderBytes != 64<<10 {
 		t.Errorf("MaxHeaderBytes = %d, want %d", srv.MaxHeaderBytes, 64<<10)
+	}
+}
+
+func request(h http.Handler, peer string, hdr map[string]string) int {
+	r := httptest.NewRequest("POST", "/login", nil)
+	r.RemoteAddr = peer
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Code
+}
+
+// The secret-route limiter main builds takes its client address from the
+// configured CLIENT_IP_SOURCE: through config.Load and newSecretLimit, the same
+// path run() uses. A zero Source (the bug this pins) would put every client
+// behind the proxy in one bucket.
+func TestSecretLimitUsesConfiguredClientIPSource(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
+	build := func(env string) http.Handler {
+		t.Setenv("CLIENT_IP_SOURCE", env)
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		limit, err := newSecretLimit(cfg.ClientIPSource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return limit(ok)
+	}
+
+	// cloudflare: 11 distinct clients behind one peer all get through (the burst
+	// is 10 per client), and one client is cut off on its 11th request.
+	h := build("cloudflare")
+	for i := range 11 {
+		if code := request(h, "10.0.0.1:1", map[string]string{"CF-Connecting-IP": "203.0.113." + strconv.Itoa(i+1)}); code != 200 {
+			t.Fatalf("cloudflare: distinct client %d refused (%d)", i, code)
+		}
+	}
+	h = build("cloudflare")
+	for i := range 10 {
+		if code := request(h, "10.0.0.1:1", map[string]string{"CF-Connecting-IP": "198.51.100.9"}); code != 200 {
+			t.Fatalf("request %d: %d", i, code)
+		}
+	}
+	if code := request(h, "10.0.0.1:1", map[string]string{"CF-Connecting-IP": "198.51.100.9"}); code != 429 {
+		t.Errorf("11th request from one client = %d, want 429", code)
+	}
+
+	// remote (and so a spoofed header): the peer is the client.
+	h = build("remote")
+	var last int
+	for i := range 11 {
+		last = request(h, "10.0.0.1:1", map[string]string{"CF-Connecting-IP": "203.0.113." + strconv.Itoa(i+1)})
+	}
+	if last != 429 {
+		t.Errorf("remote: rotating CF-Connecting-IP escaped the limit (%d)", last)
+	}
+
+	// The secret limiter is fail-closed at a full table: the 10,001st address is refused.
+	h = build("remote")
+	for i := range 10_000 {
+		peer := "10." + strconv.Itoa(i/65536) + "." + strconv.Itoa(i/256%256) + "." + strconv.Itoa(i%256) + ":1"
+		if code := request(h, peer, nil); code != 200 {
+			t.Fatalf("address %d refused below the cap (%d)", i, code)
+		}
+	}
+	if code := request(h, "192.0.2.1:1", nil); code != 429 {
+		t.Errorf("an unseen address at a full table = %d, want 429", code)
 	}
 }
