@@ -76,22 +76,70 @@ func TestCreateUserRefusesDuplicateEmail(t *testing.T) {
 	}
 }
 
-func TestCreateUserRefusesMalformedHash(t *testing.T) {
-	s := newStore(t)
-	if _, err := s.CreateUser("a@example.com", "A", "plaintext", false, t0); err == nil {
-		t.Fatal("a malformed hash was stored: that account could never sign in")
-	}
-}
-
-func TestCreateUserRefusesBcrypt(t *testing.T) {
-	s := newStore(t)
+func TestPasswordWritesRejectInvalidHashes(t *testing.T) {
 	// A valid bcrypt hash is supported by the module but never was by Budget.
 	const bcryptHash = "$2a$10$twjQA8BMDdFuHP3afXoWe.PWv/NGS/A2zpHSrgDmWAVc/fzuPmJ66"
 	if err := password.Validate(bcryptHash); err != nil {
 		t.Fatalf("invalid bcrypt fixture: %v", err)
 	}
-	if _, err := s.CreateUser("a@example.com", "A", bcryptHash, false, t0); err == nil {
-		t.Fatal("bcrypt hash was stored despite Budget's Argon2id-only policy")
+
+	for _, tc := range []struct{ name, invalidHash string }{
+		{"plaintext", "plaintext"},
+		{"malformed Argon2id", "$argon2id$broken"},
+		{"bcrypt", bcryptHash},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const email = "a@example.com"
+			const goodPassword = "correct horse battery"
+
+			t.Run("CreateUser", func(t *testing.T) {
+				s := newStore(t)
+				if _, err := s.CreateUser(email, "A", tc.invalidHash, false, t0); err == nil {
+					t.Error("CreateUser accepted an invalid hash")
+				}
+				if _, found, err := s.FindByEmail(email); found || err != nil {
+					t.Errorf("after rejected create: found=%v, err=%v", found, err)
+				}
+			})
+
+			t.Run("SetPassword", func(t *testing.T) {
+				s := newStore(t)
+				u, err := s.CreateUser(email, "A", hash(t, goodPassword), false, t0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				token, err := s.IssueSession(u.ID, t0, time.Hour)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if changed, err := s.SetPassword(u.ID, tc.invalidHash, false); changed || err == nil {
+					t.Errorf("SetPassword accepted an invalid hash: changed=%v, err=%v", changed, err)
+				}
+				if ok, err := s.CheckUserPassword(t.Context(), u.ID, goodPassword); !ok || err != nil {
+					t.Errorf("after rejected reset, current password: ok=%v, err=%v", ok, err)
+				}
+				if _, ok, err := s.VerifySession(token, t0); !ok || err != nil {
+					t.Errorf("after rejected reset, existing session: ok=%v, err=%v", ok, err)
+				}
+			})
+
+			t.Run("ClaimSetup", func(t *testing.T) {
+				s := newStore(t)
+				const token = "setup-token"
+				if _, err := s.CreateSetupToken(token, t0); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.ClaimSetup(token, email, "A", tc.invalidHash, t0); err == nil {
+					t.Error("ClaimSetup accepted an invalid hash")
+				}
+				if _, found, err := s.FindByEmail(email); found || err != nil {
+					t.Errorf("after rejected claim: found=%v, err=%v", found, err)
+				}
+				if ok, err := s.CheckSetupToken(token); !ok || err != nil {
+					t.Errorf("after rejected claim, setup token: ok=%v, err=%v", ok, err)
+				}
+			})
+		})
 	}
 }
 

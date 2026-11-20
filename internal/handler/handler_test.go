@@ -23,6 +23,7 @@ import (
 	"github.com/17xande-dev/budget/internal/handler"
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
+	"github.com/17xande-dev/password"
 	"golang.org/x/time/rate"
 )
 
@@ -291,6 +292,30 @@ func TestMalformedStoredHashIsChargedAsLoginFailure(t *testing.T) {
 	}
 	if r := b.login(email, ownerPassword); r.code != http.StatusTooManyRequests {
 		t.Errorf("sixth attempt: got %d, want 429", r.code)
+	}
+}
+
+func TestBcryptStoredHashIsRefusedAtLogin(t *testing.T) {
+	e := newEnv(t)
+	e.claim()
+	const email = "owner@example.com"
+	// The shared verifier accepts this exact credential. Insert it directly so
+	// only Budget's login policy, not its write guard, can refuse it.
+	const bcryptHash = "$2a$10$twjQA8BMDdFuHP3afXoWe.PWv/NGS/A2zpHSrgDmWAVc/fzuPmJ66"
+	const bcryptPassword = "fixture password — correct horse"
+	if ok, _, err := password.Check(t.Context(), bcryptHash, bcryptPassword); !ok || err != nil {
+		t.Fatalf("invalid bcrypt fixture: ok=%v, err=%v", ok, err)
+	}
+	if _, err := e.db.Exec(`UPDATE users SET password_hash = ? WHERE email = ?`, bcryptHash, email); err != nil {
+		t.Fatal(err)
+	}
+	b := e.browser()
+	r := b.login(email, bcryptPassword)
+	if r.code != http.StatusUnauthorized || !strings.Contains(r.body, "Email or password is incorrect.") {
+		t.Fatalf("bcrypt login: got %d, want 401 with the generic login failure", r.code)
+	}
+	if r := b.get("/"); r.code != http.StatusSeeOther || !strings.HasPrefix(r.loc, "/login") {
+		t.Errorf("bcrypt login created a session: home returned %d -> %q", r.code, r.loc)
 	}
 }
 
