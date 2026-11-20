@@ -20,7 +20,6 @@ import (
 	"github.com/17xande-dev/budget/internal/handler"
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
-	"golang.org/x/time/rate"
 )
 
 // fetchEnv is newEnv with a fetcher wired to a fake FNB.
@@ -44,7 +43,7 @@ func fetchEnv(t *testing.T, loginErr error) (*env, *fetch.Fetcher) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h.Server(middleware.RequireUser(users), middleware.NewLimiter(rate.Inf, 1).ByIP(middleware.ClientIPRemote), nil))
+	srv := httptest.NewServer(h.Server(middleware.RequireUser(users), func(h http.Handler) http.Handler { return h }, nil))
 	t.Cleanup(srv.Close)
 	return &env{t: t, srv: srv, users: users, h: h}, f
 }

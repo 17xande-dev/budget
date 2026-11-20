@@ -5,10 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/17xande-dev/budget/internal/middleware"
-	"golang.org/x/time/rate"
 )
 
 var ok = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -71,61 +69,5 @@ func TestCSPHasNoUnsafeInline(t *testing.T) {
 	}
 	if strings.Contains(middleware.CSP, "unsafe-inline") {
 		t.Error("CSP allows unsafe-inline")
-	}
-}
-
-func TestLimiterByIP(t *testing.T) {
-	l := middleware.NewLimiter(rate.Every(time.Hour), 2)
-	h := l.ByIP(middleware.ClientIPRemote)(ok)
-	codes := []int{}
-	for range 3 {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/login", nil)
-		req.RemoteAddr = "203.0.113.9:1234"
-		h.ServeHTTP(rec, req)
-		codes = append(codes, rec.Code)
-	}
-	if codes[0] != 200 || codes[1] != 200 || codes[2] != http.StatusTooManyRequests {
-		t.Fatalf("codes = %v, want 200 200 429", codes)
-	}
-
-	// Another address has its own bucket.
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/login", nil)
-	req.RemoteAddr = "198.51.100.1:1234"
-	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Errorf("a different IP was limited: %d", rec.Code)
-	}
-}
-
-func TestLimiterExhaustedDoesNotSpend(t *testing.T) {
-	l := middleware.NewLimiter(rate.Every(time.Hour), 1)
-	for range 5 {
-		if l.Exhausted("k") {
-			t.Fatal("peeking spent a token")
-		}
-	}
-	l.Allow("k")
-	if !l.Exhausted("k") {
-		t.Fatal("not exhausted after spending the only token")
-	}
-}
-
-// An IPv6 client can use any address in its /64; rotating them must not earn a
-// fresh bucket.
-func TestLimiterByIPKeysIPv6ByPrefix(t *testing.T) {
-	l := middleware.NewLimiter(rate.Every(time.Hour), 2)
-	h := l.ByIP(middleware.ClientIPRemote)(ok)
-	var codes []int
-	for _, addr := range []string{"[2001:db8:1:2::1]:1", "[2001:db8:1:2::2]:2", "[2001:db8:1:2:aaaa::3]:3"} {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/login", nil)
-		req.RemoteAddr = addr
-		h.ServeHTTP(rec, req)
-		codes = append(codes, rec.Code)
-	}
-	if codes[0] != 200 || codes[1] != 200 || codes[2] != http.StatusTooManyRequests {
-		t.Fatalf("codes = %v, want 200 200 429", codes)
 	}
 }

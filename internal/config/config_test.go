@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -53,14 +54,34 @@ func TestShortSetupTokenIgnored(t *testing.T) {
 }
 
 func TestClientIPSource(t *testing.T) {
+	// A request from a fixed peer carrying a spoofable CF-Connecting-IP: the key
+	// the configured source reads from it tells the sources apart.
+	addr := func(c Config) string {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "10.0.0.1:1234"
+		r.Header.Set("CF-Connecting-IP", "203.0.113.7")
+		r.Header.Set("X-Forwarded-For", "198.51.100.2")
+		return c.ClientIPSource.Addr(r).String()
+	}
+
 	c, err := Load()
-	if err != nil || c.ClientIPSource != "remote" {
-		t.Errorf("default = %q, %v; want remote", c.ClientIPSource, err)
+	if err != nil || addr(c) != "10.0.0.1" {
+		t.Errorf("default = %q, %v; want the peer", addr(c), err)
 	}
 
 	t.Setenv("CLIENT_IP_SOURCE", "cloudflare")
-	if c, err := Load(); err != nil || c.ClientIPSource != "cloudflare" {
-		t.Errorf("cloudflare: %q, %v", c.ClientIPSource, err)
+	if c, err := Load(); err != nil || addr(c) != "203.0.113.7" {
+		t.Errorf("cloudflare: %q, %v; want CF-Connecting-IP", addr(c), err)
+	}
+
+	t.Setenv("CLIENT_IP_SOURCE", "forwarded")
+	if c, err := Load(); err != nil || addr(c) != "198.51.100.2" {
+		t.Errorf("forwarded: %q, %v; want X-Forwarded-For", addr(c), err)
+	}
+
+	t.Setenv("CLIENT_IP_SOURCE", "remote")
+	if c, err := Load(); err != nil || addr(c) != "10.0.0.1" {
+		t.Errorf("remote: %q, %v; want the peer", addr(c), err)
 	}
 
 	t.Setenv("CLIENT_IP_SOURCE", "everyone")

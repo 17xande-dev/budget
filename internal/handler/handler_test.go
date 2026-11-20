@@ -24,7 +24,6 @@ import (
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/password"
-	"golang.org/x/time/rate"
 )
 
 const setupToken = "test-setup-token-that-is-long-enough"
@@ -62,7 +61,7 @@ func newEnvWith(t *testing.T, cfg handler.Config) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	limit := middleware.NewLimiter(rate.Inf, 1).ByIP(middleware.ClientIPRemote)
+	limit := func(h http.Handler) http.Handler { return h } // the per-IP limit has its own tests in internal/middleware
 	srv := httptest.NewServer(h.Server(middleware.RequireUser(users), limit, nil))
 	t.Cleanup(srv.Close)
 	return &env{t: t, srv: srv, users: users, h: h, db: d}

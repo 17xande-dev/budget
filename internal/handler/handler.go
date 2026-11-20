@@ -13,6 +13,7 @@ import (
 	"github.com/17xande-dev/budget/internal/fetch"
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
+	"github.com/17xande-dev/ratelimit"
 	"github.com/justinas/nosurf"
 	"golang.org/x/time/rate"
 )
@@ -43,7 +44,7 @@ type Handler struct {
 	// they can a cookie; the per-IP limiter wrapping the route is the looser
 	// ceiling behind it. Only failures are charged, so signing in successfully a
 	// few times in a row never locks anyone out.
-	loginByEmail *middleware.Limiter
+	loginByEmail *ratelimit.Limiter
 
 	fetcher   *fetch.Fetcher
 	backupDir string
@@ -59,11 +60,14 @@ func New(users *auth.Store, led *ledger.Store, bud *budget.Store, cfg Config) (*
 		budget:       bud,
 		cookieSecure: cfg.CookieSecure,
 		sessionTTL:   cfg.SessionTTL,
-		loginByEmail: middleware.NewLimiter(rate.Every(time.Minute), 5),
 		fetcher:      cfg.Fetcher,
 		backupDir:    cfg.BackupDir,
 	}
 	var err error
+	// 30 minutes idle, as before: long enough for a bucket to have refilled.
+	if h.loginByEmail, err = ratelimit.New(ratelimit.Config{Rate: rate.Every(time.Minute), Burst: 5, IdleTTL: 30 * time.Minute}); err != nil {
+		return nil, err
+	}
 	if h.assets, err = loadAssets(); err != nil {
 		return nil, err
 	}

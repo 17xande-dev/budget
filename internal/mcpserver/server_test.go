@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,8 +25,8 @@ import (
 	"github.com/17xande-dev/budget/internal/mcpserver"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/password"
+	"github.com/17xande-dev/ratelimit/clientip"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"golang.org/x/time/rate"
 )
 
 func TestMain(m *testing.M) {
@@ -59,8 +60,11 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.mcp = mcpserver.New(mcpserver.Deps{Users: f.users, Ledger: f.ledger, Budget: f.budget, Version: "test"})
-	limit := middleware.NewLimiter(rate.Inf, 1).ByIP(middleware.ClientIPRemote)
+	f.mcp, err = mcpserver.New(mcpserver.Deps{Users: f.users, Ledger: f.ledger, Budget: f.budget, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := func(h http.Handler) http.Handler { return h }
 	f.srv = httptest.NewServer(h.Server(middleware.RequireUser(f.users), limit, f.mcp.Handler()))
 	t.Cleanup(f.srv.Close)
 
@@ -492,5 +496,46 @@ func TestToolsDescribeDescriptionsAsData(t *testing.T) {
 		if tool.Annotations == nil || tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
 			t.Errorf("%s: missing closed-world annotation", tool.Name)
 		}
+	}
+}
+
+// The failed-token limit is keyed on the configured client address. Behind the
+// default (peer-only) source a caller cannot reset it by inventing
+// CF-Connecting-IP values; behind cloudflare each real client has its own.
+func TestFailedTokenLimitFollowsClientIPSource(t *testing.T) {
+	f := newFixture(t)
+	try := func(src clientip.Source, cfIP func(i int) string) (limited bool, retryAfter string) {
+		s, err := mcpserver.New(mcpserver.Deps{Users: f.users, Ledger: f.ledger, Budget: f.budget, ClientIPSource: src, Version: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := s.Handler()
+		for i := range 8 {
+			req := httptest.NewRequest("POST", "/mcp", strings.NewReader("{}"))
+			req.RemoteAddr = "10.0.0.1:1000"
+			req.Header.Set("Authorization", "Bearer bgt_guess")
+			req.Header.Set("CF-Connecting-IP", cfIP(i))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code == http.StatusTooManyRequests {
+				return true, rec.Header().Get("Retry-After")
+			}
+		}
+		return false, ""
+	}
+	rotating := func(i int) string { return "203.0.113." + strconv.Itoa(i+1) }
+
+	if limited, ra := try(clientip.Source{}, rotating); !limited || ra != "60" {
+		t.Errorf("peer-only source: limited=%v Retry-After=%q; want limited with 60", limited, ra)
+	}
+	cf, err := clientip.ParseSource("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limited, _ := try(cf, rotating); limited {
+		t.Error("cloudflare source: distinct CF-Connecting-IP clients shared a bucket")
+	}
+	if limited, _ := try(cf, func(int) string { return "203.0.113.50" }); !limited {
+		t.Error("cloudflare source: one client was never limited")
 	}
 }

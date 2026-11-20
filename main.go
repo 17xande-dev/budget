@@ -28,6 +28,7 @@ import (
 	"github.com/17xande-dev/budget/internal/mcpserver"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/password"
+	"github.com/17xande-dev/ratelimit"
 	"golang.org/x/time/rate"
 )
 
@@ -112,9 +113,16 @@ func serve(cfg config.Config) error {
 	// One per-IP ceiling for every route that verifies a secret. Generous enough
 	// that a fumbled password or two never trips it; the per-email tier inside
 	// the login handler is the tight one.
-	secretLimit := middleware.NewLimiter(rate.Every(10*time.Second), 10).ByIP(cfg.ClientIPSource)
+	secretIP, err := ratelimit.New(ratelimit.Config{Rate: rate.Every(10 * time.Second), Burst: 10, IdleTTL: 30 * time.Minute})
+	if err != nil {
+		return fmt.Errorf("init rate limit: %w", err)
+	}
+	secretLimit := middleware.ByIP(secretIP, cfg.ClientIPSource)
 
-	mcp := mcpserver.New(mcpserver.Deps{Users: users, Ledger: led, Budget: bud, ClientIPSource: cfg.ClientIPSource, Version: version})
+	mcp, err := mcpserver.New(mcpserver.Deps{Users: users, Ledger: led, Budget: bud, ClientIPSource: cfg.ClientIPSource, Version: version})
+	if err != nil {
+		return fmt.Errorf("init mcp: %w", err)
+	}
 
 	app := h.Server(middleware.RequireUser(users), secretLimit, mcp.Handler())
 

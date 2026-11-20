@@ -65,7 +65,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Checked before verifying, so a locked address costs no argon2 at all.
-	emailKey := "email:" + strings.ToLower(email)
+	emailKey := loginEmailKey(email)
 	if h.loginByEmail.Exhausted(emailKey) {
 		fail(http.StatusTooManyRequests, "Too many failed attempts for this address. Wait a minute and try again.")
 		return

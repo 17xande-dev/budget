@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/17xande-dev/budget/internal/middleware"
+	"github.com/17xande-dev/ratelimit/clientip"
 )
 
 type Config struct {
@@ -33,8 +33,8 @@ type Config struct {
 	// the rate limits: remote (the TCP peer; the default and the safe one, but
 	// behind a proxy every client then shares one bucket), forwarded (leftmost
 	// X-Forwarded-For) or cloudflare (CF-Connecting-IP). Set it to what is true of
-	// the deployment; see middleware.ClientIPSource.
-	ClientIPSource middleware.ClientIPSource
+	// the deployment; see clientip.ParseSource.
+	ClientIPSource clientip.Source
 
 	// BackupDir receives a daily copy of the database; BackupKeep is how many
 	// days are kept there. BackupKeep 0 turns backups off.
@@ -87,7 +87,7 @@ func Load() (Config, error) {
 		return Config{}, errors.New("config: TRUSTED_PROXIES has been replaced by CLIENT_IP_SOURCE " +
 			"(remote, forwarded or cloudflare); unset it, and set CLIENT_IP_SOURCE=cloudflare only behind the Cloudflare tunnel")
 	}
-	src, err := middleware.ParseClientIPSource(getenv("CLIENT_IP_SOURCE", string(middleware.ClientIPRemote)))
+	src, err := clientip.ParseSource(getenv("CLIENT_IP_SOURCE", "remote"))
 	if err != nil {
 		return Config{}, fmt.Errorf("config: CLIENT_IP_SOURCE: %w", err)
 	}
