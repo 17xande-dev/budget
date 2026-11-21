@@ -1,10 +1,14 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/17xande-dev/sqlitekit"
 )
 
 func openTemp(t *testing.T) *sql.DB {
@@ -110,5 +114,29 @@ func TestOldDatabaseRefused(t *testing.T) {
 	_, err = Open(path)
 	if err == nil || !strings.Contains(err.Error(), "recreate-db") {
 		t.Fatalf("old database: %v", err)
+	}
+}
+
+// Open must hand back a database whose settings really took: foreign keys, WAL
+// and the busy timeout are silent when missing, so the check is the test.
+func TestOpenSettingsInEffect(t *testing.T) {
+	d := openTemp(t)
+	if err := sqlitekit.Check(context.Background(), d, Options); err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := d.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "wal" {
+		t.Errorf("journal_mode = %q, %v; want wal", mode, err)
+	}
+}
+
+// A failed settings check must stop startup: Open runs it and refuses the database.
+func TestOpenRefusesWhenSettingsNotInEffect(t *testing.T) {
+	old := checkSettings
+	checkSettings = func(context.Context, *sql.DB, sqlitekit.Options) error { return errors.New("foreign_keys is off") }
+	defer func() { checkSettings = old }()
+	_, err := Open(filepath.Join(t.TempDir(), "x.db"))
+	if err == nil || !strings.Contains(err.Error(), "foreign_keys is off") {
+		t.Fatalf("Open = %v, want the Check failure", err)
 	}
 }

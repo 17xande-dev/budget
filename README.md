@@ -114,14 +114,22 @@ now and then:
 docker compose cp budget:/data/backups ./budget-backups
 ```
 
+The database runs in WAL mode, so while the app is up it is three files: `budget.db`,
+`budget.db-wal` and `budget.db-shm`. **Never copy `budget.db` (or tar the volume) of a
+running app**: recent commits live in the `-wal` file and a copy of the `.db` alone can be
+torn or miss them. Take a backup through the app (the `backups/` folder above, made with
+`VACUUM INTO`), or stop the app first. The image is distroless, so it has no `sqlite3` CLI
+for `.backup`.
+
 To restore one, stop the app and copy it over the database inside the volume (the
 image has no shell, so a throwaway busybox does the copy; overwriting keeps the
-file's owner, the app's non-root user):
+file's owner, the app's non-root user). The stale `-wal` and `-shm` files go too: a
+leftover `-wal` would be replayed onto the restored file:
 
 ```sh
 docker compose stop budget
 docker run --rm --volumes-from "$(docker compose ps -aq budget)" busybox \
-  sh -c 'cp /data/backups/budget-2026-10-05.db /data/budget.db && chown 65532:65532 /data/budget.db'
+  sh -c 'rm -f /data/budget.db-wal /data/budget.db-shm && cp /data/backups/budget-2026-10-05.db /data/budget.db && chown 65532:65532 /data/budget.db'
 docker compose start budget
 ```
 
@@ -159,6 +167,7 @@ dependency, and why:
 | Dependency | For | Why not the alternative |
 |---|---|---|
 | `modernc.org/sqlite` | SQLite driver | Pure Go, so `CGO_ENABLED=0` and a distroless/static image with no libc or shell. `mattn/go-sqlite3` is smaller and canonical, but needs cgo and an Alpine-class runtime. modernc is a large machine-translated module; accepted for the static image, which matters more here because the container will hold bank credentials. |
+| `github.com/17xande-dev/sqlitekit` | SQLite settings, startup check, backups, goose on STRICT tables | The shared house standard: one DSN (foreign keys, WAL, busy timeout, immediate transactions), `Check` at startup so a setting the driver ignored fails loudly, and the same backup and migration code every app uses. |
 | `github.com/17xande-dev/password` | Argon2id password hashing | Shares hash validation and the concurrency limiter across apps. |
 | `github.com/17xande-dev/ratelimit` | per-IP and per-key rate limits, and client-IP resolution (`clientip`) | Shared with the other apps; bounded, fail-closed buckets built on `x/time/rate`. |
 | `justinas/nosurf` | CSRF tokens and origin checks | Same. |
@@ -211,6 +220,5 @@ stop and fall back to manual upload rather than evade it.
 | Fetch-failure notification | now: status page + overview banner; later: email or ntfy push | if a failure goes unnoticed in practice |
 | inContact email feed (IMAP) for same-day transactions | add / never | after Phase 5 |
 | An MCP tool to trigger the FNB fetch | no for now: it would let an AI cause a bank login | only if asked, after Phase 5 |
-| WAL mode | off (SQLite's default journal) / on. Two people never contend, so nothing forces it; backups use `VACUUM INTO`, which works the same either way | if writes ever wait on a long read (the fetch, an export) |
 | Off-host backups | by hand for now (`docker compose cp`, above) / a scheduled push to R2 or another machine | before the data is worth more than a re-import of the last three months |
 | CI | none: the remote is public but there is no hosting CI; `make test` (with `-race` and `govulncheck`) is the gate / GitHub Actions | if a run on every push is wanted |

@@ -2,15 +2,25 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
+
+	"github.com/17xande-dev/sqlitekit"
 
 	// modernc rather than mattn: it is pure Go, so the binary builds with
 	// CGO_ENABLED=0 and ships on distroless/static with no libc and no shell.
 	// The price is a large machine-translated dependency; see README.
 	_ "modernc.org/sqlite"
 )
+
+// Options are the SQLite settings the app asks sqlitekit for. Nothing here needs
+// secure_delete: the data is financial but a deleted row lingering in a free page
+// of a file only the app's user can read is no worse than the live rows.
+var Options = sqlitekit.Options{}
+
+// checkSettings is a variable only so a test can prove Open runs it.
+var checkSettings = sqlitekit.Check
 
 // Every table is STRICT: SQLite otherwise applies "type affinity" and will happily
 // store the string "banana" in an INTEGER column. Every column is therefore TEXT or
@@ -213,27 +223,19 @@ var requiredColumns = map[string][]string{
 // Open opens the database at path (creating it if needed) and applies the schema.
 // IF NOT EXISTS throughout, so it is safe on every start.
 func Open(path string) (*sql.DB, error) {
-	q := url.Values{}
-	// SQLite enforces no foreign key without this: every REFERENCES above is
-	// decoration until it is set, per connection.
-	q.Add("_pragma", "foreign_keys(1)")
-	// modernc does not default a busy timeout the way mattn does (5s). Without
-	// one a contended lock is an immediate SQLITE_BUSY rather than a short wait,
-	// and with the daily fetch writing while someone browses, that would surface
-	// as a random 500.
-	q.Add("_pragma", "busy_timeout(5000)")
-	// BEGIN IMMEDIATE takes the write lock up front. A deferred transaction that
-	// reads and then writes (claiming the setup token, say) can otherwise fail
-	// with SQLITE_BUSY at the upgrade, which busy_timeout does not help with.
-	q.Add("_txlock", "immediate")
-
-	d, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	dsn, err := sqlitekit.DSN(path, Options)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := d.Ping(); err != nil {
+	d, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	// Before anything else: a driver that ignored a setting (foreign keys, WAL,
+	// busy timeout) would otherwise run silently without it.
+	if err := checkSettings(context.Background(), d, Options); err != nil {
 		d.Close()
-		return nil, fmt.Errorf("ping sqlite %s: %w", path, err)
+		return nil, fmt.Errorf("sqlite settings not in effect on %s: %w", path, err)
 	}
 	if _, err := d.Exec(schema); err != nil {
 		d.Close()
