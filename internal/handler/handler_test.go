@@ -357,6 +357,11 @@ func TestOpenRedirectRefused(t *testing.T) {
 		"//evil.example":       "/",
 		"/\\evil.example":      "/",
 		"":                     "/",
+		// A browser drops the tab (or the %09-decoded tab) and reads the rest
+		// as "//evil.example", so these are open redirects if accepted.
+		"/\t/evil.example":  "/",
+		"/%09/evil.example": "/",
+		"/\\evil":           "/",
 	} {
 		b := e.browser()
 		r := b.post("/login", "/login", url.Values{"email": {"owner@example.com"}, "password": {ownerPassword}, "next": {next}})

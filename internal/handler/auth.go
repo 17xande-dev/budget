@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -120,11 +121,28 @@ func (h *Handler) signedIn(r *http.Request) bool {
 	return err == nil && ok
 }
 
-// safeNext sanitises a ?next= target to a path on this server. An absolute URL
-// would make the login form an open redirect -- a ready-made phishing step.
+// safeNext keeps a post-sign-in redirect on this site: a path starting with
+// exactly one "/", with no scheme, host or control characters. Browsers strip
+// tabs and newlines from a URL and read a backslash as a slash, so "/\tevil",
+// "/%09/evil.example" and "/\\evil" would all send the visitor to another
+// host. Anything doubtful is dropped (the redirect goes to homePath).
 func safeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") ||
-		strings.HasPrefix(next, "/\\") || strings.ContainsAny(next, "\r\n") {
+	if next == "" || len(next) > 2048 || next[0] != '/' || strings.HasPrefix(next, "//") {
+		return homePath
+	}
+	bad := func(s string) bool {
+		return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '\\' })
+	}
+	if bad(next) {
+		return homePath
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return homePath
+	}
+	// The decoded path must hold the same line: "/%09/evil.example" decodes
+	// to "/<tab>/evil.example", and a proxy or a later decode might act on it.
+	if bad(u.Path) || !strings.HasPrefix(u.Path, "/") || strings.HasPrefix(u.Path, "//") {
 		return homePath
 	}
 	return next
