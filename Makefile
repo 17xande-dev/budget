@@ -70,7 +70,7 @@ reset-password:
 	@read -rsp "New password for $(EMAIL): " P; echo; \
 	  printf '%s\n' "$$P" | DB_PATH=$(DB_PATH) go run . reset-password "$(EMAIL)"
 
-## recreate-db: DELETE the local database. The schema-change path while greenfield.
+## recreate-db: DELETE the local database (and its -wal/-shm). For a throwaway local copy; a schema change is a new migration file.
 recreate-db:
 	rm -f $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm
 

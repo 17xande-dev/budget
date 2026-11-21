@@ -4,9 +4,15 @@ package db
 import (
 	"context"
 	"database/sql"
+	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
+	"slices"
+	"strings"
 
 	"github.com/17xande-dev/sqlitekit"
+	"github.com/17xande-dev/sqlitekit/goosestrict"
 
 	// modernc rather than mattn: it is pure Go, so the binary builds with
 	// CGO_ENABLED=0 and ships on distroless/static with no libc and no shell.
@@ -22,206 +28,45 @@ var Options = sqlitekit.Options{}
 // checkSettings is a variable only so a test can prove Open runs it.
 var checkSettings = sqlitekit.Check
 
-// Every table is STRICT: SQLite otherwise applies "type affinity" and will happily
-// store the string "banana" in an INTEGER column. Every column is therefore TEXT or
+// The schema is goose migrations under migrations/, embedded. Every table is
+// STRICT: SQLite otherwise applies "type affinity" and will happily store the
+// string "banana" in an INTEGER column. Every column is therefore TEXT or
 // INTEGER. Timestamps are RFC3339 TEXT in UTC; SQLite has no datetime type.
 //
 // STRICT cannot be retrofitted: CREATE TABLE IF NOT EXISTS ... STRICT silently does
 // nothing to a table that already exists, and reports success. db_test.go therefore
-// asserts against sqlite_master rather than trusting this DDL.
+// asserts against sqlite_master rather than trusting the DDL.
 //
-// There is deliberately no migration machinery while the project is greenfield: a
-// schema change is `make recreate-db`. A startup ALTER against a STRICT table can
-// only half-migrate (new column, old table definition), so do not add one by
-// reflex. Adopt goose once there is data worth preserving.
-const schema = `
--- The people who can sign in. There are two and no roles: both can see and do
--- everything, which is the point of a household budget.
-CREATE TABLE IF NOT EXISTS users (
-	id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-	email                TEXT NOT NULL UNIQUE COLLATE NOCASE,
-	name                 TEXT NOT NULL,
-	password_hash        TEXT NOT NULL,
-	-- Set when somebody else chose this password (adding a member), so the next
-	-- sign-in is forced through the change form before anything else opens.
-	must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
-	created_at           TEXT NOT NULL,
-	last_login_at        TEXT NOT NULL DEFAULT ''
-) STRICT;
+// Schema changes are new numbered migration files, never an edit to an applied
+// one and never a startup ALTER: an ALTER against a STRICT table can only
+// half-migrate (new column, old table definition), and the database would diverge
+// silently from the migration files.
+//
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
--- Sessions are opaque random tokens; only their sha256 is stored, so a copy of
--- this file does not hand over live sessions.
-CREATE TABLE IF NOT EXISTS sessions (
-	token_hash TEXT PRIMARY KEY,
-	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	created_at TEXT NOT NULL,
-	expires_at TEXT NOT NULL
-) STRICT;
+// baselineFile is the schema as it stood when the app moved from CREATE TABLE IF
+// NOT EXISTS to goose. A database that predates goose is adopted at this version,
+// once, and only after it is verified to match it.
+const baselineFile = "0001_baseline.sql"
 
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+// versionTable is goose's version table. Its absence on a database that has tables
+// marks one that goose has never managed.
+const versionTable = "goose_db_version"
 
--- API tokens: a person's credential for an AI client acting as them over MCP.
--- Sessions in every way that matters (random, only the sha256 stored, revocable
--- because the row is the token) but long-lived, several per person, named, and
--- shown exactly once. A password change deletes them with the sessions.
-CREATE TABLE IF NOT EXISTS api_tokens (
-	id           INTEGER PRIMARY KEY AUTOINCREMENT,
-	user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	name         TEXT NOT NULL,
-	token_hash   TEXT NOT NULL UNIQUE,
-	created_at   TEXT NOT NULL,
-	last_used_at TEXT NOT NULL DEFAULT '',
-	expires_at   TEXT NOT NULL
-) STRICT;
-
-CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
-
--- The first-run bootstrap: a deployment with no users issues a one-time token,
--- printed to the log, which claims the first account at /setup. A single row
--- (CHECK id = 1) so a second boot conflicts instead of replacing a live token,
--- and consumed for ever once spent. Preferred over a default password (which
--- someone forgets to change) or an open first-run page (which whoever finds the
--- deployment first gets to claim).
-CREATE TABLE IF NOT EXISTS setup (
-	id          INTEGER PRIMARY KEY CHECK (id = 1),
-	token_hash  TEXT NOT NULL,
-	created_at  TEXT NOT NULL,
-	consumed_at TEXT NOT NULL DEFAULT ''
-) STRICT;
-
--- A bank account, created the first time an import names it. ref is how every
--- FNB format identifies it: the account number, or the masked card number
--- ("400000******1234") for a credit card.
-CREATE TABLE IF NOT EXISTS accounts (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	ref        TEXT NOT NULL UNIQUE,
-	name       TEXT NOT NULL,
-	kind       TEXT NOT NULL CHECK (kind IN ('cheque', 'credit', 'savings', 'loan', 'other')),
-	-- fetch: whether the daily FNB fetch imports this account. Off for an
-	-- account you do not want in the budget (an old or unused one).
-	fetch      INTEGER NOT NULL DEFAULT 1 CHECK (fetch IN (0, 1)),
-	created_at TEXT NOT NULL
-) STRICT;
-
--- One row per statement imported, or per file that failed to import, so the
--- history shows what happened to every upload and every daily fetch.
-CREATE TABLE IF NOT EXISTS imports (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	source     TEXT NOT NULL CHECK (source IN ('upload', 'fnb')),
-	filename   TEXT NOT NULL,
-	format     TEXT NOT NULL DEFAULT '',
-	account_id INTEGER REFERENCES accounts(id),
-	user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
-	inserted   INTEGER NOT NULL DEFAULT 0,
-	skipped    INTEGER NOT NULL DEFAULT 0,
-	error      TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL
-) STRICT;
-
--- What a transaction is for. kind decides how reports treat it: expense counts
--- as spending (a refund in an expense category reduces it), income as income,
--- and transfer -- money moved between your own accounts, a card repayment --
--- as neither. Categories are archived, never deleted, so history keeps meaning.
-CREATE TABLE IF NOT EXISTS categories (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
-	kind       TEXT NOT NULL CHECK (kind IN ('expense', 'income', 'transfer')),
-	archived   INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-	created_at TEXT NOT NULL
-) STRICT;
-
--- posted_on is a calendar date (YYYY-MM-DD), not an instant: FNB's dates are
--- South African days and are never converted between timezones. Money is integer
--- cents.
---
--- dedup_key makes importing idempotent across formats and exports: see
--- ledger.DedupKeys. Never FITID, which collides for identical same-day purchases
--- and differs between FNB's two OFX exports.
-CREATE TABLE IF NOT EXISTS transactions (
-	id            INTEGER PRIMARY KEY AUTOINCREMENT,
-	account_id    INTEGER NOT NULL REFERENCES accounts(id),
-	posted_on     TEXT NOT NULL CHECK (posted_on GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]'),
-	amount_cents  INTEGER NOT NULL,
-	description   TEXT NOT NULL,
-	balance_cents INTEGER,
-	fitid         TEXT NOT NULL DEFAULT '',
-	import_id     INTEGER NOT NULL REFERENCES imports(id),
-	dedup_key     TEXT NOT NULL UNIQUE,
-	-- category_source says who chose the category: a rule may fill an empty
-	-- one, but never overrides a person's (or an AI's) choice.
-	category_id     INTEGER REFERENCES categories(id),
-	category_source TEXT NOT NULL DEFAULT '' CHECK (category_source IN ('', 'rule', 'manual', 'ai')),
-	created_at    TEXT NOT NULL
-) STRICT;
-
-CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(posted_on);
-CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON transactions(account_id, posted_on);
-CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
-
--- "Description contains pattern" (case-insensitive), optionally only on one
--- account. When several match, the longest pattern wins: it is the more
--- specific one ("WOOLWORTHS FOOD" before "WOOLWORTHS").
-CREATE TABLE IF NOT EXISTS rules (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	pattern     TEXT NOT NULL CHECK (length(trim(pattern)) > 0),
-	category_id INTEGER NOT NULL REFERENCES categories(id),
-	account_id  INTEGER REFERENCES accounts(id),
-	created_at  TEXT NOT NULL
-) STRICT;
-
--- How much a category may take in a month (or, for income, is expected to bring).
-CREATE TABLE IF NOT EXISTS budget_targets (
-	category_id  INTEGER NOT NULL REFERENCES categories(id),
-	month        TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]'),
-	target_cents INTEGER NOT NULL CHECK (target_cents >= 0),
-	PRIMARY KEY (category_id, month)
-) STRICT;
-
--- Every change a person or an AI makes to budgeting data, with what it replaced,
--- so a change is visible and -- for categorisation -- undoable. before/after hold
--- the old and new values as text ('' for none).
-CREATE TABLE IF NOT EXISTS audit_log (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
-	via        TEXT NOT NULL CHECK (via IN ('web', 'mcp')),
-	token_name TEXT NOT NULL DEFAULT '',
-	action     TEXT NOT NULL,
-	subject_id INTEGER,
-	before     TEXT NOT NULL DEFAULT '',
-	after      TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	undone_at  TEXT NOT NULL DEFAULT ''
-) STRICT;
-
-CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
-
--- Each attempt of the FNB fetch, scheduled or manual: the status page reads it,
--- and it is what stops a second run starting while one is going or a scheduled
--- one repeating on the same day.
-CREATE TABLE IF NOT EXISTS fetch_runs (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	trigger     TEXT NOT NULL CHECK (trigger IN ('schedule', 'manual')),
-	user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
-	started_at  TEXT NOT NULL,
-	finished_at TEXT NOT NULL DEFAULT '',
-	status      TEXT NOT NULL CHECK (status IN ('running', 'ok', 'failed')),
-	accounts    INTEGER NOT NULL DEFAULT 0,
-	inserted    INTEGER NOT NULL DEFAULT 0,
-	message     TEXT NOT NULL DEFAULT ''
-) STRICT;
-`
-
-// requiredColumns are columns added to a table after it first shipped. CREATE
-// TABLE IF NOT EXISTS cannot add them to an existing file, so Open checks for
-// them and refuses to start on a database that predates them -- with a message
-// that says what to do -- rather than failing on the first query that needs one.
+// requiredColumns are columns added to a table after it first shipped, from when
+// the schema was one CREATE TABLE IF NOT EXISTS script. A database without them
+// is refused with a message that says what to do, before the general comparison
+// against the baseline would name the same column less helpfully.
 var requiredColumns = map[string][]string{
 	"transactions": {"category_id", "category_source"},
 	"accounts":     {"fetch"},
 }
 
-// Open opens the database at path (creating it if needed) and applies the schema.
-// IF NOT EXISTS throughout, so it is safe on every start.
+// Open opens the database at path (creating it if needed) and brings its schema up
+// to date: a new database is migrated from nothing, one made before goose is
+// verified against the baseline and adopted, and one newer than this binary is
+// refused.
 func Open(path string) (*sql.DB, error) {
 	dsn, err := sqlitekit.DSN(path, Options)
 	if err != nil {
@@ -237,24 +82,163 @@ func Open(path string) (*sql.DB, error) {
 		d.Close()
 		return nil, fmt.Errorf("sqlite settings not in effect on %s: %w", path, err)
 	}
-	if _, err := d.Exec(schema); err != nil {
+	files, err := fs.Sub(migrationsFS, "migrations")
+	if err != nil {
 		d.Close()
-		return nil, fmt.Errorf("apply schema: %w (a database older than the schema needs `make recreate-db`)", err)
+		return nil, err // a constant, embedded path
 	}
-	for table, cols := range requiredColumns {
-		for _, col := range cols {
+	if err := migrate(context.Background(), d, files); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("database %s: %w", path, err)
+	}
+	return d, nil
+}
+
+// migrate applies the pending migrations in files. A database that has tables but
+// no goose version table was made by the old CREATE TABLE IF NOT EXISTS script:
+// it is adopted at version 1, but only once it provably holds the baseline's
+// schema, because adopting tells goose migration 1 is done and goose never looks
+// again. goosestrict.NewProvider refuses a database newer than files.
+func migrate(ctx context.Context, d *sql.DB, files fs.FS) error {
+	legacy, err := hasTablesButNoVersionTable(ctx, d)
+	if err != nil {
+		return err
+	}
+	if legacy {
+		if err := verifyBaseline(ctx, d, files); err != nil {
+			return err
+		}
+		if err := goosestrict.Adopt(ctx, d, 1); err != nil {
+			return fmt.Errorf("adopt at the baseline: %w", err)
+		}
+	}
+	p, err := goosestrict.NewProvider(d, files)
+	if err != nil {
+		return err
+	}
+	if _, err := p.Up(ctx); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
+func hasTablesButNoVersionTable(ctx context.Context, d *sql.DB) (bool, error) {
+	var hasVersion, tables int
+	err := d.QueryRowContext(ctx, `SELECT
+		count(*) FILTER (WHERE name = ?),
+		count(*) FILTER (WHERE name NOT LIKE 'sqlite_%')
+		FROM sqlite_master WHERE type = 'table'`, versionTable).Scan(&hasVersion, &tables)
+	if err != nil {
+		return false, fmt.Errorf("inspect database: %w", err)
+	}
+	return hasVersion == 0 && tables > 0, nil
+}
+
+// column is what the baseline promises about one column: its declared type,
+// whether it is NOT NULL, and its primary-key position.
+type column struct {
+	typ     string
+	notNull bool
+	pk      int
+}
+
+// verifyBaseline refuses a database whose tables are not the baseline's. It builds
+// the baseline in a throwaway in-memory database and requires every table and
+// column there to exist in the live one with the same type, NOT NULL and primary
+// key. Extra tables or columns in the live database are not its business.
+func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
+	for _, table := range sortedKeys(requiredColumns) {
+		for _, col := range requiredColumns[table] {
 			var n int
-			if err := d.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, col).Scan(&n); err != nil {
-				d.Close()
-				return nil, fmt.Errorf("check schema: %w", err)
+			if err := live.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, col).Scan(&n); err != nil {
+				return fmt.Errorf("check schema: %w", err)
 			}
 			if n == 0 {
-				d.Close()
-				return nil, fmt.Errorf("database %s predates column %s.%s; it cannot be migrated in place "+
-					"(there are no migrations while the project is greenfield): recreate it with `make recreate-db` "+
-					"and import the FNB exports again", path, table, col)
+				return fmt.Errorf("the database predates column %s.%s and cannot be migrated in place: "+
+					"recreate it with `make recreate-db` and import the FNB exports again", table, col)
 			}
 		}
 	}
-	return d, nil
+
+	baseline, err := fs.ReadFile(files, baselineFile)
+	if err != nil {
+		return err
+	}
+	ref, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return err
+	}
+	defer ref.Close()
+	ref.SetMaxOpenConns(1) // every :memory: connection is its own database
+	if _, err := ref.ExecContext(ctx, string(baseline)); err != nil {
+		return fmt.Errorf("apply the baseline to a scratch database: %w", err)
+	}
+	want, err := columnsByTable(ctx, ref)
+	if err != nil {
+		return err
+	}
+	got, err := columnsByTable(ctx, live)
+	if err != nil {
+		return err
+	}
+	for _, table := range sortedKeys(want) {
+		have, ok := got[table]
+		if !ok {
+			return mismatch("table %s is missing", table)
+		}
+		for _, name := range sortedKeys(want[table]) {
+			w := want[table][name]
+			h, ok := have[name]
+			switch {
+			case !ok:
+				return mismatch("column %s.%s is missing", table, name)
+			case !strings.EqualFold(h.typ, w.typ):
+				return mismatch("column %s.%s has type %s, want %s", table, name, h.typ, w.typ)
+			case h.notNull != w.notNull:
+				return mismatch("column %s.%s has NOT NULL = %t, want %t", table, name, h.notNull, w.notNull)
+			case h.pk != w.pk:
+				return mismatch("column %s.%s has primary key position %d, want %d", table, name, h.pk, w.pk)
+			}
+		}
+	}
+	return nil
+}
+
+func mismatch(format string, args ...any) error {
+	return errors.New("the database does not match the baseline schema, so it is not adopted: " +
+		fmt.Sprintf(format, args...) + ". Restore a database that matches, or recreate it with `make recreate-db`")
+}
+
+func columnsByTable(ctx context.Context, d *sql.DB) (map[string]map[string]column, error) {
+	rows, err := d.QueryContext(ctx, `SELECT m.name, c.name, c.type, c."notnull", c.pk
+		FROM sqlite_master m, pragma_table_info(m.name) c
+		WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]map[string]column{}
+	for rows.Next() {
+		var table, name, typ string
+		var c column
+		var notNull int
+		if err := rows.Scan(&table, &name, &typ, &notNull, &c.pk); err != nil {
+			return nil, err
+		}
+		c.typ, c.notNull = typ, notNull != 0
+		if out[table] == nil {
+			out[table] = map[string]column{}
+		}
+		out[table][name] = c
+	}
+	return out, rows.Err()
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }

@@ -1,0 +1,174 @@
+-- The people who can sign in. There are two and no roles: both can see and do
+-- everything, which is the point of a household budget.
+CREATE TABLE IF NOT EXISTS users (
+	id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+	email                TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	name                 TEXT NOT NULL,
+	password_hash        TEXT NOT NULL,
+	-- Set when somebody else chose this password (adding a member), so the next
+	-- sign-in is forced through the change form before anything else opens.
+	must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
+	created_at           TEXT NOT NULL,
+	last_login_at        TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Sessions are opaque random tokens; only their sha256 is stored, so a copy of
+-- this file does not hand over live sessions.
+CREATE TABLE IF NOT EXISTS sessions (
+	token_hash TEXT PRIMARY KEY,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- API tokens: a person's credential for an AI client acting as them over MCP.
+-- Sessions in every way that matters (random, only the sha256 stored, revocable
+-- because the row is the token) but long-lived, several per person, named, and
+-- shown exactly once. A password change deletes them with the sessions.
+CREATE TABLE IF NOT EXISTS api_tokens (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	name         TEXT NOT NULL,
+	token_hash   TEXT NOT NULL UNIQUE,
+	created_at   TEXT NOT NULL,
+	last_used_at TEXT NOT NULL DEFAULT '',
+	expires_at   TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+
+-- The first-run bootstrap: a deployment with no users issues a one-time token,
+-- printed to the log, which claims the first account at /setup. A single row
+-- (CHECK id = 1) so a second boot conflicts instead of replacing a live token,
+-- and consumed for ever once spent. Preferred over a default password (which
+-- someone forgets to change) or an open first-run page (which whoever finds the
+-- deployment first gets to claim).
+CREATE TABLE IF NOT EXISTS setup (
+	id          INTEGER PRIMARY KEY CHECK (id = 1),
+	token_hash  TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	consumed_at TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- A bank account, created the first time an import names it. ref is how every
+-- FNB format identifies it: the account number, or the masked card number
+-- ("400000******1234") for a credit card.
+CREATE TABLE IF NOT EXISTS accounts (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	ref        TEXT NOT NULL UNIQUE,
+	name       TEXT NOT NULL,
+	kind       TEXT NOT NULL CHECK (kind IN ('cheque', 'credit', 'savings', 'loan', 'other')),
+	-- fetch: whether the daily FNB fetch imports this account. Off for an
+	-- account you do not want in the budget (an old or unused one).
+	fetch      INTEGER NOT NULL DEFAULT 1 CHECK (fetch IN (0, 1)),
+	created_at TEXT NOT NULL
+) STRICT;
+
+-- One row per statement imported, or per file that failed to import, so the
+-- history shows what happened to every upload and every daily fetch.
+CREATE TABLE IF NOT EXISTS imports (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	source     TEXT NOT NULL CHECK (source IN ('upload', 'fnb')),
+	filename   TEXT NOT NULL,
+	format     TEXT NOT NULL DEFAULT '',
+	account_id INTEGER REFERENCES accounts(id),
+	user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	inserted   INTEGER NOT NULL DEFAULT 0,
+	skipped    INTEGER NOT NULL DEFAULT 0,
+	error      TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+) STRICT;
+
+-- What a transaction is for. kind decides how reports treat it: expense counts
+-- as spending (a refund in an expense category reduces it), income as income,
+-- and transfer -- money moved between your own accounts, a card repayment --
+-- as neither. Categories are archived, never deleted, so history keeps meaning.
+CREATE TABLE IF NOT EXISTS categories (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	kind       TEXT NOT NULL CHECK (kind IN ('expense', 'income', 'transfer')),
+	archived   INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+	created_at TEXT NOT NULL
+) STRICT;
+
+-- posted_on is a calendar date (YYYY-MM-DD), not an instant: FNB's dates are
+-- South African days and are never converted between timezones. Money is integer
+-- cents.
+--
+-- dedup_key makes importing idempotent across formats and exports: see
+-- ledger.DedupKeys. Never FITID, which collides for identical same-day purchases
+-- and differs between FNB's two OFX exports.
+CREATE TABLE IF NOT EXISTS transactions (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	account_id    INTEGER NOT NULL REFERENCES accounts(id),
+	posted_on     TEXT NOT NULL CHECK (posted_on GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]'),
+	amount_cents  INTEGER NOT NULL,
+	description   TEXT NOT NULL,
+	balance_cents INTEGER,
+	fitid         TEXT NOT NULL DEFAULT '',
+	import_id     INTEGER NOT NULL REFERENCES imports(id),
+	dedup_key     TEXT NOT NULL UNIQUE,
+	-- category_source says who chose the category: a rule may fill an empty
+	-- one, but never overrides a person's (or an AI's) choice.
+	category_id     INTEGER REFERENCES categories(id),
+	category_source TEXT NOT NULL DEFAULT '' CHECK (category_source IN ('', 'rule', 'manual', 'ai')),
+	created_at    TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(posted_on);
+CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON transactions(account_id, posted_on);
+CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
+
+-- "Description contains pattern" (case-insensitive), optionally only on one
+-- account. When several match, the longest pattern wins: it is the more
+-- specific one ("WOOLWORTHS FOOD" before "WOOLWORTHS").
+CREATE TABLE IF NOT EXISTS rules (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	pattern     TEXT NOT NULL CHECK (length(trim(pattern)) > 0),
+	category_id INTEGER NOT NULL REFERENCES categories(id),
+	account_id  INTEGER REFERENCES accounts(id),
+	created_at  TEXT NOT NULL
+) STRICT;
+
+-- How much a category may take in a month (or, for income, is expected to bring).
+CREATE TABLE IF NOT EXISTS budget_targets (
+	category_id  INTEGER NOT NULL REFERENCES categories(id),
+	month        TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]'),
+	target_cents INTEGER NOT NULL CHECK (target_cents >= 0),
+	PRIMARY KEY (category_id, month)
+) STRICT;
+
+-- Every change a person or an AI makes to budgeting data, with what it replaced,
+-- so a change is visible and -- for categorisation -- undoable. before/after hold
+-- the old and new values as text ('' for none).
+CREATE TABLE IF NOT EXISTS audit_log (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	via        TEXT NOT NULL CHECK (via IN ('web', 'mcp')),
+	token_name TEXT NOT NULL DEFAULT '',
+	action     TEXT NOT NULL,
+	subject_id INTEGER,
+	before     TEXT NOT NULL DEFAULT '',
+	after      TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	undone_at  TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+
+-- Each attempt of the FNB fetch, scheduled or manual: the status page reads it,
+-- and it is what stops a second run starting while one is going or a scheduled
+-- one repeating on the same day.
+CREATE TABLE IF NOT EXISTS fetch_runs (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	trigger     TEXT NOT NULL CHECK (trigger IN ('schedule', 'manual')),
+	user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	started_at  TEXT NOT NULL,
+	finished_at TEXT NOT NULL DEFAULT '',
+	status      TEXT NOT NULL CHECK (status IN ('running', 'ok', 'failed')),
+	accounts    INTEGER NOT NULL DEFAULT 0,
+	inserted    INTEGER NOT NULL DEFAULT 0,
+	message     TEXT NOT NULL DEFAULT ''
+) STRICT;

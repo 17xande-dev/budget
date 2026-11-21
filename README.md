@@ -143,7 +143,7 @@ a formula (`=`, `+`, `-`, `@`) are prefixed with `'`.
 main.go                 wiring, graceful shutdown, `reset-password` subcommand
 setup_token.go          first-boot setup token
 internal/config         all environment parsing
-internal/db             SQLite open + schema (STRICT tables)
+internal/db             SQLite open + goose migrations (STRICT tables), backups
 internal/auth           argon2id passwords, sessions, setup claim
 internal/importer       FNB CSV / OFX / ZIP parsers (pure; fixture-tested)
 internal/ledger         accounts, transactions, import history
@@ -190,9 +190,16 @@ keep `system-ui` / `ui-monospace` fallbacks, so the app works fully if the host 
 blocked or unreachable.
 
 **SQLite, one instance.** It changes to Postgres only if a second app instance or
-another process needs the database. STRICT tables throughout; no migrations while
-greenfield (`make recreate-db`) — adopt goose once there is real data worth
-keeping. Money will be integer cents.
+another process needs the database. STRICT tables throughout. The schema is goose
+migrations in `internal/db/migrations/`, applied at startup through
+`sqlitekit/goosestrict` (its version table is STRICT too). `0001_baseline.sql` is the
+schema as it was before goose; a database made by the old `CREATE TABLE IF NOT EXISTS`
+script is adopted at version 1 once, and only after every table and column of the
+baseline is verified to exist in it with the same type, NOT NULL and primary key. A
+mismatch refuses to start and names the table and column. A database written by a newer
+build is refused too. A schema change is a new numbered file, never an edit to an
+applied one. `make recreate-db` remains the way to throw a local database away.
+Money is integer cents.
 
 **Auth.** Two named accounts, no roles. Sessions are random tokens stored as
 sha256 in a table, so a password change ends every session. The first account is

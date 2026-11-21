@@ -13,7 +13,7 @@ project follows.
 make run            # bundle TS, then serve http://localhost:8080 (COOKIE_SECURE=false)
 make test           # THE gate: gofmt, vet, go test -count=1, deno check/test/fmt/lint
 make build          # bundle + bin/budget
-make recreate-db    # schema change while greenfield
+make recreate-db    # delete the local database (throwaway copies only)
 docker build -t budget . && docker run --rm -p 127.0.0.1:18080:8080 -e COOKIE_SECURE=false budget
 ```
 
@@ -32,7 +32,10 @@ docker build -t budget . && docker run --rm -p 127.0.0.1:18080:8080 -e COOKIE_SE
   The test helper does it; a hand-rolled scrape will fail one run in a few.
 - **Times are UTC RFC3339 TEXT.** Render with the `time` partial, which labels UTC
   and lets `src/ts/localtime.ts` localise it. Never show an unlabelled UTC time.
-- **STRICT cannot be retrofitted**, and there is no startup ALTER by design.
+- **STRICT cannot be retrofitted**, and there is no startup ALTER by design. The
+  schema is goose migrations in internal/db/migrations; `0001_baseline.sql` is frozen
+  (`TestBaselineIsTheOldSchema`), every change is a new numbered file with `-- +goose Up`
+  (wrap triggers and `BEGIN...END` in `StatementBegin/End`).
 - **Dedup is content-based** (account, date, amount, collapsed description,
   occurrence index): `ledger.DedupKeys`. Never key on FITID. Any change to how
   descriptions are normalised changes every key and would re-import everything,
@@ -45,8 +48,9 @@ docker build -t budget . && docker run --rm -p 127.0.0.1:18080:8080 -e COOKIE_SE
 - **Every budgeting write goes through `internal/budget` with an `Actor`**, which
   writes the audit log in the same transaction. Rules never override a category a
   person or an AI chose (`category_source`).
-- **Schema changes to an existing table need `requiredColumns`** in internal/db,
-  so an old database refuses to start with a clear message.
+- **Adoption of a pre-goose database is verified against `0001_baseline.sql`**
+  (internal/db `verifyBaseline`): do not widen what it accepts, because adopting at 1
+  makes goose skip migration 1 for ever.
 - **MCP tools are registered through `add` in internal/mcpserver** with an explicit
   read-only flag; every write tool needs a case in `TestEveryWriteToolIsAudited`, and
   must write the audit log (through internal/budget, or `Budget.Record`).
