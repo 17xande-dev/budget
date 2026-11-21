@@ -111,10 +111,12 @@ nothing else in it is ever deleted. Each is a complete, ordinary database made w
 **Settings** shows the latest and warns when it is over two days old.
 
 They sit on the same disk, so they undo a mistake or corruption, not a lost machine or
-volume: they do not survive losing the disk. Copy them off now and then:
+volume: they do not survive losing the disk. Copy them off now and then. Production
+(Kamal, volume `budget_budget-data` on `home-docker`; the backups are finished files, so
+reading them while the app runs is safe):
 
 ```sh
-docker compose cp budget:/data/backups ./budget-backups
+ssh ubuntu@home-docker docker run --rm -v budget_budget-data:/data:ro busybox tar -C /data -c backups | tar -x
 ```
 
 The database runs in WAL mode, so while the app is up it is three files: `budget.db`,
@@ -124,12 +126,25 @@ torn or miss them. Take a backup through the app (the `backups/` folder above, m
 `VACUUM INTO`), or stop the app first. The image is distroless, so it has no `sqlite3` CLI
 for `.backup`.
 
-To restore one, stop the app and copy it over the database inside the volume (the
-image has no shell, so a throwaway busybox does the copy; overwriting keeps the
-file's owner, the app's non-root user). The stale `-wal` and `-shm` files go too: a
-leftover `-wal` would be replayed onto the restored file:
+To restore one, stop the app and copy the chosen backup over the database inside the
+volume. The image has no shell, so a throwaway busybox on the volume does the copy
+(overwriting keeps the file's owner, the app's non-root user 65532). The stale `-wal` and
+`-shm` files go too: a leftover `-wal` would be replayed onto the restored file. In
+production:
 
 ```sh
+kamal app stop
+kamal server exec "docker run --rm -v budget_budget-data:/data busybox sh -c 'rm -f /data/budget.db-wal /data/budget.db-shm && cp /data/backups/budget-2026-10-05.db /data/budget.db && chown 65532:65532 /data/budget.db'"
+kamal app start
+```
+
+Check `kamal app logs` and Settings afterwards. A database restored from a backup made by
+an older build is migrated forward on start; one made by a newer build is refused.
+
+With the local `compose.yaml` stack (volume `budget-data`) the same steps are:
+
+```sh
+docker compose cp budget:/data/backups ./budget-backups   # copy backups off
 docker compose stop budget
 docker run --rm --volumes-from "$(docker compose ps -aq budget)" busybox \
   sh -c 'rm -f /data/budget.db-wal /data/budget.db-shm && cp /data/backups/budget-2026-10-05.db /data/budget.db && chown 65532:65532 /data/budget.db'
