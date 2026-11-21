@@ -212,11 +212,14 @@ another process needs the database. STRICT tables throughout. The schema is goos
 migrations in `internal/db/migrations/`, applied at startup through
 `sqlitekit/goosestrict` (its version table is STRICT too). `0001_baseline.sql` is the
 schema as it was before goose; a database made by the old `CREATE TABLE IF NOT EXISTS`
-script is adopted at version 1 once, and only after every table and column of the
-baseline is verified to exist in it with the same type, NOT NULL and primary key,
-and every table to be STRICT (which cannot be retrofitted: a non-strict table is refused
-for a rebuild by hand, never rebuilt automatically). A mismatch refuses to start and
-names the table and column. A database written by a newer
+script is first completed the way the old binary did on every start (the baseline is run
+against it, every statement `IF NOT EXISTS`, so a table or index added since its image is
+created), then adopted at version 1 once, and only after the baseline is verified: every
+table and column exists with the same type, NOT NULL and primary key, every index matches
+(table, columns, uniqueness, partial WHERE), and every table is STRICT (which cannot be
+retrofitted: a non-strict table is refused for a rebuild by hand, never rebuilt
+automatically). A mismatch refuses to start and names what is wrong; the fix is the
+previous image run once, or a matching backup. A database written by a newer
 build is refused too. A schema change is a new numbered file, never an edit to an
 applied one. `make recreate-db` remains the way to throw a local database away.
 Money is integer cents.

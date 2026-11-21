@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -142,10 +143,21 @@ type column struct {
 	pk      int
 }
 
-// verifyBaseline refuses a database whose tables are not the baseline's. It builds
-// the baseline in a throwaway in-memory database and requires every table and
-// column there to exist in the live one with the same type, NOT NULL and primary
-// key. Extra tables or columns in the live database are not its business.
+// verifyBaseline completes a pre-goose database and then refuses it unless it is
+// the baseline's.
+//
+// Completing: the old binary ran the whole baseline (every statement CREATE ... IF
+// NOT EXISTS) on every start, so a database from an older image that lacks a table
+// or index added since got it on its next boot. Adopting must not be stricter than
+// that, so the baseline is run against the live database first, in one transaction,
+// exactly as the old binary did. It creates what is missing and leaves what exists
+// alone, so a wrongly shaped table stays wrongly shaped.
+//
+// Verifying: a throwaway in-memory database is built from the baseline and every
+// table, column, index and STRICT flag there must exist in the live one: columns
+// with the same type, NOT NULL and primary key, indexes with the same table,
+// columns, uniqueness and partial WHERE. Extra tables, columns or indexes in the
+// live database are not its business.
 func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
 	for _, table := range sortedKeys(requiredColumns) {
 		for _, col := range requiredColumns[table] {
@@ -155,7 +167,8 @@ func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
 			}
 			if n == 0 {
 				return fmt.Errorf("the database predates column %s.%s and cannot be migrated in place: "+
-					"recreate it with `make recreate-db` and import the FNB exports again", table, col)
+					"run the previous image once if it added the column, restore a backup that has it, "+
+					"or recreate it with `make recreate-db` and import the FNB exports again", table, col)
 			}
 		}
 	}
@@ -163,6 +176,11 @@ func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
 	baseline, err := fs.ReadFile(files, baselineFile)
 	if err != nil {
 		return err
+	}
+	// The old binary's start-up step, in one transaction so a failure leaves none of it.
+	// It can fail on an old table missing a column an index needs; that is a refusal too.
+	if err := applyBaseline(ctx, live, string(baseline)); err != nil {
+		return mismatch("the baseline could not be applied to it (%v)", err)
 	}
 	ref, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -213,12 +231,131 @@ func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
 			}
 		}
 	}
-	return nil
+	return verifyIndexes(ctx, ref, live)
 }
 
+func applyBaseline(ctx context.Context, d *sql.DB, baseline string) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, baseline); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// mismatch is the refusal. The database may already have gained the tables and
+// indexes it was missing (and it is a WAL file now), so this does not claim it is
+// untouched: it says what is wrong and how to get a database that is adoptable.
 func mismatch(format string, args ...any) error {
 	return errors.New("the database does not match the baseline schema, so it is not adopted: " +
-		fmt.Sprintf(format, args...) + ". Restore a database that matches, or recreate it with `make recreate-db`")
+		fmt.Sprintf(format, args...) + ". Tables and indexes it was missing may have been added; nothing that existed was changed. " +
+		"Run the previous image once, or restore a backup that matches " +
+		"(`make recreate-db` for a throwaway local one)")
+}
+
+// index is what the baseline promises about one index.
+type index struct {
+	table   string
+	cols    string // column names in order, comma separated
+	unique  bool
+	partial string // the WHERE clause of a partial index, whitespace collapsed
+	auto    bool   // made by a UNIQUE or PRIMARY KEY constraint, so the name is not stable
+}
+
+var whereClause = regexp.MustCompile(`(?is)\swhere\s(.*)$`)
+
+func indexesByName(ctx context.Context, d *sql.DB) (map[string]index, error) {
+	type row struct {
+		table, name, origin string
+		unique              int
+		sql                 sql.NullString
+	}
+	rows, err := d.QueryContext(ctx, `SELECT m.name, il.name, il.origin, il."unique", s.sql
+		FROM sqlite_master m, pragma_index_list(m.name) il
+		LEFT JOIN sqlite_master s ON s.type = 'index' AND s.name = il.name
+		WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return nil, fmt.Errorf("read indexes: %w", err)
+	}
+	var list []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.table, &r.name, &r.origin, &r.unique, &r.sql); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		list = append(list, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	out := map[string]index{}
+	for _, r := range list {
+		colRows, err := d.QueryContext(ctx, `SELECT name FROM pragma_index_info(?) ORDER BY seqno`, r.name)
+		if err != nil {
+			return nil, fmt.Errorf("read index %s: %w", r.name, err)
+		}
+		var cols []string
+		for colRows.Next() {
+			var c sql.NullString // NULL for an expression
+			if err := colRows.Scan(&c); err != nil {
+				colRows.Close()
+				return nil, err
+			}
+			cols = append(cols, c.String)
+		}
+		colRows.Close()
+		ix := index{table: r.table, cols: strings.Join(cols, ","), unique: r.unique != 0, auto: r.origin != "c"}
+		if m := whereClause.FindStringSubmatch(r.sql.String); m != nil {
+			ix.partial = strings.Join(strings.Fields(m[1]), " ")
+		}
+		out[r.name] = ix
+	}
+	return out, nil
+}
+
+// verifyIndexes requires every index of the baseline to exist in live with the same
+// table, columns, uniqueness and partial WHERE. A named index must keep its name;
+// the indexes SQLite makes for UNIQUE and PRIMARY KEY constraints are matched by
+// shape, since their names are generated.
+func verifyIndexes(ctx context.Context, ref, live *sql.DB) error {
+	want, err := indexesByName(ctx, ref)
+	if err != nil {
+		return err
+	}
+	got, err := indexesByName(ctx, live)
+	if err != nil {
+		return err
+	}
+	for _, name := range sortedKeys(want) {
+		w := want[name]
+		if w.auto {
+			found := false
+			for _, g := range got {
+				if g == w {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return mismatch("table %s lacks the unique constraint on (%s)", w.table, w.cols)
+			}
+			continue
+		}
+		g, ok := got[name]
+		switch {
+		case !ok:
+			return mismatch("index %s is missing", name)
+		case g != w:
+			return mismatch("index %s is on %s(%s) unique=%t where %q, want %s(%s) unique=%t where %q",
+				name, g.table, g.cols, g.unique, g.partial, w.table, w.cols, w.unique, w.partial)
+		}
+	}
+	return nil
 }
 
 // strictTables reports which tables of d are STRICT, from pragma_table_list.

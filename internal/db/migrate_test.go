@@ -195,9 +195,15 @@ func TestAdoptionRefusesASchemaMismatch(t *testing.T) {
 		tweak func(string) string
 		want  string
 	}{
-		{"missing table", func(s string) string {
-			return strings.Replace(s, "CREATE TABLE IF NOT EXISTS fetch_runs", "CREATE TABLE IF NOT EXISTS other_runs", 1)
-		}, "table fetch_runs is missing"},
+		{"index on other columns", func(s string) string {
+			return strings.Replace(s, "ON sessions(user_id)", "ON sessions(token_hash)", 1)
+		}, "index idx_sessions_user is on sessions(token_hash)"},
+		{"index not unique", func(s string) string {
+			return strings.Replace(s, "CREATE INDEX IF NOT EXISTS idx_transactions_date", "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_date", 1)
+		}, "index idx_transactions_date is on transactions(posted_on) unique=true"},
+		{"unique constraint dropped", func(s string) string {
+			return strings.Replace(s, "	token_hash   TEXT NOT NULL UNIQUE,", "	token_hash   TEXT NOT NULL,", 1)
+		}, "table api_tokens lacks the unique constraint on (token_hash)"},
 		{"missing column", func(s string) string { return strings.Replace(s, "	token_name TEXT NOT NULL DEFAULT '',\n", "", 1) }, "audit_log.token_name is missing"},
 		{"wrong type", func(s string) string {
 			// categories has no seeded rows, so the INTEGER column accepts the fixture.
@@ -234,5 +240,79 @@ func TestAdoptionRefusesASchemaMismatch(t *testing.T) {
 				t.Error("a refused database got a version table")
 			}
 		})
+	}
+}
+
+func tableExists(t *testing.T, d *sql.DB, kind, name string) bool {
+	t.Helper()
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = ? AND name = ?`, kind, name).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
+// An image from before a table or index existed booted fine on the old binary, which
+// created whatever was missing on every start. Adopting must do the same, or the
+// first deploy of this version would refuse a database the last one accepted.
+func TestLegacyDatabaseMissingATableIsCompleted(t *testing.T) {
+	path := oldDatabase(t, func(s string) string {
+		return strings.Replace(s, "CREATE TABLE IF NOT EXISTS fetch_runs", "CREATE TABLE IF NOT EXISTS unrelated_runs", 1)
+	})
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if !tableExists(t, d, "table", "fetch_runs") {
+		t.Fatal("the missing table was not created")
+	}
+	strict, err := strictTables(t.Context(), d)
+	if err != nil || !strict["fetch_runs"] {
+		t.Errorf("fetch_runs strict = %v, %v; want a STRICT table", strict["fetch_runs"], err)
+	}
+	if n := count(t, d, "transactions"); n != 1 {
+		t.Errorf("transactions: %d rows, want 1", n)
+	}
+	p, err := goosestrict.NewProvider(d, withLaterMigration(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := p.GetDBVersion(t.Context()); err != nil || v != 1 {
+		t.Errorf("adopted at %d, %v; want 1", v, err)
+	}
+}
+
+func TestLegacyDatabaseMissingAnIndexIsCompleted(t *testing.T) {
+	path := oldDatabase(t, func(s string) string {
+		return strings.Replace(s, "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);", "", 1)
+	})
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if !tableExists(t, d, "index", "idx_sessions_user") {
+		t.Fatal("the missing index was not created")
+	}
+}
+
+// The refusal must not claim the file is untouched (it is WAL now and may have
+// gained tables), and must say how to get an adoptable database.
+func TestRefusalSaysWhatIsWrongAndHowToFixIt(t *testing.T) {
+	path := oldDatabase(t, func(s string) string {
+		return strings.Replace(s, "name       TEXT NOT NULL UNIQUE COLLATE NOCASE", "name       INTEGER NOT NULL UNIQUE COLLATE NOCASE", 1)
+	})
+	_, err := Open(path)
+	if err == nil {
+		t.Fatal("a wrongly typed column was adopted")
+	}
+	for _, want := range []string{"categories.name has type INTEGER", "previous image", "restore a backup"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "untouched") || strings.Contains(err.Error(), "unchanged") {
+		t.Errorf("refusal claims the file was not changed: %q", err)
 	}
 }

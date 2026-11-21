@@ -49,7 +49,8 @@ docker build -t budget . && docker run --rm -p 127.0.0.1:18080:8080 -e COOKIE_SE
   writes the audit log in the same transaction. Rules never override a category a
   person or an AI chose (`category_source`).
 - **Adoption of a pre-goose database is verified against `0001_baseline.sql`**
-  (internal/db `verifyBaseline`): do not widen what it accepts, because adopting at 1
+  (internal/db `verifyBaseline`, which first runs the baseline's `IF NOT EXISTS` statements
+  as the old binary did, then checks tables, columns, STRICT and indexes): do not widen what it accepts, because adopting at 1
   makes goose skip migration 1 for ever.
 - **MCP tools are registered through `add` in internal/mcpserver** with an explicit
   read-only flag; every write tool needs a case in `TestEveryWriteToolIsAudited`, and
