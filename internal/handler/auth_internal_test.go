@@ -1,55 +1,30 @@
 package handler
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-// A browser reads "/%09/evil.example" and "/\t/evil" as "//evil.example" (it
-// drops tabs and newlines), and "/\\evil" as "//evil": every one of these
-// would be an open redirect after sign-in. A refusal lands on homePath.
+// safeNext is a thin wrapper over websec.SafeRedirect, which owns the algorithm
+// and its own table. This pins the wiring: the options this app passes (no
+// Prefix, no Deny, homePath as the fallback), one hostile row, and the value
+// the auth middleware actually generates.
 func TestSafeNext(t *testing.T) {
-	for next, want := range map[string]string{
-		"/progress":                     "/progress",
-		"/sheet/arches?x=1#y":           "/sheet/arches?x=1#y",
-		"/":                             "/",
-		"":                              homePath,
-		"/%09/evil.example":             homePath,
-		"/\t/evil":                      homePath,
-		"/\n/evil":                      homePath,
-		"/\\evil":                       homePath,
-		"/\\\\evil":                     homePath,
-		"/%5Cevil":                      homePath,
-		"https://evil":                  homePath,
-		"//evil":                        homePath,
-		"///evil":                       homePath,
-		"evil":                          homePath,
-		"/%2F/evil":                     homePath, // decodes to "//evil"; refused even though a browser would keep it one segment
-		"/a\x00b":                       homePath,
-		"/a\x7fb":                       homePath,
-		"javascript:alert(1)":           homePath,
-		"/%0a/evil.example":             homePath,
-		"/..%2f..%2fetc":                "/..%2f..%2fetc",
-		"/ok?next=//evil":               "/ok?next=//evil",
-		"/ /evil":                       "/ /evil",
-		"/%00":                          homePath,
-		"/path with space":              "/path with space",
-		"/%":                            homePath,
-		"/%zz":                          homePath,
-		"/a/\x1f":                       homePath,
-		"//":                            homePath,
-		"/\r/evil":                      homePath,
-		"http://evil.example/":          homePath,
-		"/\v/evil.example":              homePath,
-		"/\f/evil.example":              homePath,
-		"/a\\b":                         homePath,
-		"/x?\\evil":                     homePath,
-		"/x#\\evil":                     homePath,
-		"/" + strings.Repeat("a", 2047): "/" + strings.Repeat("a", 2047),
-		"/" + strings.Repeat("a", 2048): homePath,
+	for _, tc := range []struct{ name, next, want string }{
+		// A browser drops a literal tab from a URL, so this reads "//evil.example":
+		// an open redirect after sign-in if accepted. (The %09 spelling is a
+		// different case: a browser keeps it on this host, and websec refuses it
+		// anyway.)
+		{"tab hides a second slash", "/\t/evil.example", homePath},
+		{"other host", "https://evil.example/", homePath},
+		{"empty falls back", "", homePath},
+		// The middleware sends an unauthenticated visitor to /login?next=<RequestURI>,
+		// so a path with a query must come back byte for byte.
+		{"middleware RequestURI with a query", "/sheet/arches?month=2026-10&q=a%20b", "/sheet/arches?month=2026-10&q=a%20b"},
+		{"root", "/", "/"},
+		// This app denies nothing: /login is a legal target here (the signed-in
+		// bounce in LoginForm handles it).
+		{"no deny list", "/login", "/login"},
 	} {
-		if got := safeNext(next); got != want {
-			t.Errorf("safeNext(%.40q) = %.40q, want %.40q", next, got, want)
+		if got := safeNext(tc.next); got != tc.want {
+			t.Errorf("%s: safeNext(%q) = %q, want %q", tc.name, tc.next, got, tc.want)
 		}
 	}
 }

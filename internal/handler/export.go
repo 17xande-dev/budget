@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"unicode"
 
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/money"
+	"github.com/17xande-dev/websec"
 )
 
 // maxExport caps one CSV. Years of a household's transactions are tens of
@@ -69,9 +69,13 @@ func (h *Handler) TransactionsCSV(w http.ResponseWriter, r *http.Request) {
 		if t.BalanceCents.Valid {
 			bal = money.Decimal(t.BalanceCents.Int64)
 		}
+		// Descriptions are written by merchants, so a text cell goes through
+		// websec.CSVCell (a spreadsheet would run a leading "=", "+", "-" or "@").
+		// Numbers are ours and never pass through it, so a negative amount stays
+		// a number.
 		cw.Write([]string{
-			t.PostedOn, csvText(t.AccountName), csvText(t.Description),
-			money.Decimal(t.AmountCents), bal, csvText(t.CategoryName), t.CategorySource,
+			t.PostedOn, websec.CSVCell(t.AccountName), websec.CSVCell(t.Description),
+			money.Decimal(t.AmountCents), bal, websec.CSVCell(t.CategoryName), t.CategorySource,
 		})
 	}
 	cw.Flush()
@@ -84,26 +88,6 @@ func (h *Handler) TransactionsCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.Write(buf.Bytes())
-}
-
-// csvText makes a text cell safe to open in a spreadsheet. Excel and Sheets
-// evaluate a cell beginning =, +, - or @ as a formula; descriptions are written
-// by merchants, so one could carry a live formula onto this machine. A leading
-// apostrophe makes the cell plain text.
-//
-// Invisible prefixes are stripped before the first meaningful character is
-// checked, because spreadsheet importers can discard a BOM, control character or
-// space before they decide whether a cell is a formula: " =1" and "\ufeff=1" are
-// formulas too. A cell that had such a prefix always gains the apostrophe, and
-// the prefix itself is dropped. Numbers are written by us and never pass through
-// here, so a negative amount stays a number.
-func csvText(s string) string {
-	clean := strings.TrimLeftFunc(s, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) })
-	prefix := len(clean) != len(s)
-	if prefix || (len(clean) > 0 && strings.ContainsRune("=+-@", rune(clean[0]))) {
-		return "'" + clean
-	}
-	return s
 }
 
 // exportName is a filename part naming the period; only characters we chose.

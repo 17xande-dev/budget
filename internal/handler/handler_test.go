@@ -357,11 +357,14 @@ func TestOpenRedirectRefused(t *testing.T) {
 		"//evil.example":       "/",
 		"/\\evil.example":      "/",
 		"":                     "/",
-		// A browser drops the tab (or the %09-decoded tab) and reads the rest
-		// as "//evil.example", so these are open redirects if accepted.
+		// A browser drops a literal tab and reads the rest as "//evil.example",
+		// so that one is an open redirect if accepted. The %09 spelling stays on
+		// this host in a browser; it is refused as a decoded control all the same.
 		"/\t/evil.example":  "/",
 		"/%09/evil.example": "/",
 		"/\\evil":           "/",
+		// What the middleware generates (RequestURI, query included) round-trips.
+		"/transactions?month=2026-10&q=a%20b": "/transactions?month=2026-10&q=a%20b",
 	} {
 		b := e.browser()
 		r := b.post("/login", "/login", url.Values{"email": {"owner@example.com"}, "password": {ownerPassword}, "next": {next}})

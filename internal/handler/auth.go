@@ -4,13 +4,13 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/17xande-dev/budget/internal/auth"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/budget/internal/validate"
+	"github.com/17xande-dev/websec"
 )
 
 // homePath is where a sign-in lands when there is no ?next=.
@@ -121,31 +121,16 @@ func (h *Handler) signedIn(r *http.Request) bool {
 	return err == nil && ok
 }
 
-// safeNext keeps a post-sign-in redirect on this site: a path starting with
-// exactly one "/", with no scheme, host or control characters. Browsers strip
-// tabs and newlines from a URL and read a backslash as a slash, so "/\tevil",
-// "/%09/evil.example" and "/\\evil" would all send the visitor to another
-// host. Anything doubtful is dropped (the redirect goes to homePath).
+// nextOpts is the post-sign-in redirect policy. No Prefix and no Deny: any page
+// of this app is a fine place to land, including after a sign-in that was
+// triggered by visiting it. A refused value lands on homePath.
+var nextOpts = websec.RedirectOptions{Fallback: homePath}
+
+// safeNext keeps a post-sign-in redirect on this site. The rules (and the
+// browser behaviour behind them: tabs and newlines stripped, a backslash read
+// as a slash) live in websec.SafeRedirect; anything doubtful goes to homePath.
 func safeNext(next string) string {
-	if next == "" || len(next) > 2048 || next[0] != '/' || strings.HasPrefix(next, "//") {
-		return homePath
-	}
-	bad := func(s string) bool {
-		return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '\\' })
-	}
-	if bad(next) {
-		return homePath
-	}
-	u, err := url.Parse(next)
-	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
-		return homePath
-	}
-	// The decoded path must hold the same line: "/%09/evil.example" decodes
-	// to "/<tab>/evil.example", and a proxy or a later decode might act on it.
-	if bad(u.Path) || !strings.HasPrefix(u.Path, "/") || strings.HasPrefix(u.Path, "//") {
-		return homePath
-	}
-	return next
+	return websec.SafeRedirect(next, nextOpts)
 }
 
 // The first-run claim: /setup exchanges the one-time token printed on a boot with
