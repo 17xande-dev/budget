@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/17xande-dev/budget/internal/handler"
+	"github.com/17xande-dev/sqlitekit"
 )
 
 // A backup that silently stopped would only be noticed when it was needed, so the
@@ -18,7 +19,7 @@ func TestSettingsBackupStatus(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	owner := newEnvWith(t, handler.Config{SessionTTL: time.Hour, BackupDir: dir}).claim()
+	owner := newEnvWith(t, handler.Config{SessionTTL: time.Hour, Backups: &sqlitekit.Backups{Dir: dir, Prefix: "budget-", Layout: "2006-01-02", Keep: 14}}).claim()
 	if page := owner.get("/settings").body; !strings.Contains(page, "No backup has been made yet") {
 		t.Error("an empty backup dir is not reported")
 	}

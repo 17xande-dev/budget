@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/17xande-dev/budget/internal/budget"
-	"github.com/17xande-dev/budget/internal/db"
 	"github.com/17xande-dev/budget/internal/fetch"
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/budget/internal/money"
+	"github.com/17xande-dev/sqlitekit"
 )
 
 // sast is where the household's months begin and end.
@@ -565,15 +565,15 @@ type settingsData struct {
 	page
 	BackupsOn bool
 	Backups   int
-	Latest    *db.BackupFile
+	Latest    *sqlitekit.BackupFile
 	Stale     bool
 	BackupErr bool
 }
 
 func (h *Handler) Settings(w http.ResponseWriter, r *http.Request) {
-	d := settingsData{page: newPage(r, "Settings", "settings"), BackupsOn: h.backupDir != ""}
+	d := settingsData{page: newPage(r, "Settings", "settings"), BackupsOn: h.backups != nil}
 	if d.BackupsOn {
-		files, err := db.Backups(h.backupDir)
+		files, err := h.backups.List()
 		if err != nil {
 			log.Printf("settings: backups: %v", err)
 			d.BackupErr = true

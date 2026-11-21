@@ -14,6 +14,7 @@ import (
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/ratelimit"
+	"github.com/17xande-dev/sqlitekit"
 	"github.com/justinas/nosurf"
 	"golang.org/x/time/rate"
 )
@@ -24,9 +25,9 @@ type Config struct {
 	// Fetcher is the FNB fetch, for its status page; nil leaves the page saying
 	// the fetch is not available.
 	Fetcher *fetch.Fetcher
-	// BackupDir is where the daily backups land, for the settings page; empty
+	// Backups is the daily backup policy, for the settings page to list; nil
 	// means backups are off.
-	BackupDir string
+	Backups *sqlitekit.Backups
 }
 
 type Handler struct {
@@ -46,8 +47,8 @@ type Handler struct {
 	// few times in a row never locks anyone out.
 	loginByEmail *ratelimit.Limiter
 
-	fetcher   *fetch.Fetcher
-	backupDir string
+	fetcher *fetch.Fetcher
+	backups *sqlitekit.Backups
 
 	// routes is every protected route as registered; see Register.
 	routes []Route
@@ -61,7 +62,7 @@ func New(users *auth.Store, led *ledger.Store, bud *budget.Store, cfg Config) (*
 		cookieSecure: cfg.CookieSecure,
 		sessionTTL:   cfg.SessionTTL,
 		fetcher:      cfg.Fetcher,
-		backupDir:    cfg.BackupDir,
+		backups:      cfg.Backups,
 	}
 	var err error
 	// 30 minutes idle, as before: long enough for a bucket to have refilled.

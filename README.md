@@ -103,12 +103,15 @@ read -rs P && printf '%s\n' "$P" | docker compose exec -T budget /budget reset-p
 
 A copy of the database is made at startup and then once a day, into `backups/`
 beside it (`/data/backups` in the container, so inside the same volume), and the
-newest 14 are kept (`BACKUP_DIR`, `BACKUP_KEEP`; `0` turns them off). Each is a
-complete database made with `VACUUM INTO`, consistent even while the app is writing.
+newest 14 are kept (`BACKUP_DIR`, `BACKUP_KEEP`; `0` turns them off). They are named
+`budget-YYYY-MM-DD.db` for the South African day, written mode 0600 into a folder the app
+owns and keeps at 0700 (so `BACKUP_DIR` must be a folder only for these backups), and
+nothing else in it is ever deleted. Each is a complete, ordinary database made with
+`VACUUM INTO` (by `sqlitekit.Backups`), consistent even while the app is writing.
 **Settings** shows the latest and warns when it is over two days old.
 
-They sit on the same disk, so they undo a mistake, not a lost machine. Copy them off
-now and then:
+They sit on the same disk, so they undo a mistake or corruption, not a lost machine or
+volume: they do not survive losing the disk. Copy them off now and then:
 
 ```sh
 docker compose cp budget:/data/backups ./budget-backups

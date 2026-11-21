@@ -103,7 +103,7 @@ func serve(cfg config.Config) error {
 	})
 	h, err := handler.New(users, led, bud, handler.Config{
 		Fetcher:      fetcher,
-		BackupDir:    backupDir(cfg),
+		Backups:      backups(cfg),
 		CookieSecure: cfg.CookieSecure,
 		SessionTTL:   cfg.SessionTTL,
 	})
@@ -135,8 +135,8 @@ func serve(cfg config.Config) error {
 	// from growing for ever.
 	go sweepSessions(ctx, users, time.Hour)
 	go fetcher.Schedule(ctx)
-	if cfg.BackupKeep > 0 {
-		go backupDaily(ctx, database, cfg.BackupDir, cfg.BackupKeep, time.Hour)
+	if b := backups(cfg); b != nil {
+		go backupDaily(ctx, database, *b, time.Hour)
 	} else {
 		log.Print("backups are off (BACKUP_KEEP=0)")
 	}
@@ -171,14 +171,6 @@ func newServer(addr string, handler http.Handler) *http.Server {
 		// the rate limiters, so keep them small.
 		MaxHeaderBytes: 64 << 10,
 	}
-}
-
-// backupDir is where the settings page looks for backups: none when they are off.
-func backupDir(cfg config.Config) string {
-	if cfg.BackupKeep == 0 {
-		return ""
-	}
-	return cfg.BackupDir
 }
 
 func sweepSessions(ctx context.Context, store *auth.Store, every time.Duration) {
