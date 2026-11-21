@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/money"
@@ -86,14 +87,21 @@ func (h *Handler) TransactionsCSV(w http.ResponseWriter, r *http.Request) {
 }
 
 // csvText makes a text cell safe to open in a spreadsheet. Excel and Sheets
-// evaluate a cell beginning =, +, - or @ (and tab or CR, which some strip first)
-// as a formula; descriptions are written by merchants, so one could carry a live
-// formula onto this machine. A leading apostrophe makes the cell plain text.
-// Numbers are written by us and never pass through here, so a negative amount
-// stays a number.
+// evaluate a cell beginning =, +, - or @ as a formula; descriptions are written
+// by merchants, so one could carry a live formula onto this machine. A leading
+// apostrophe makes the cell plain text.
+//
+// Invisible prefixes are stripped before the first meaningful character is
+// checked, because spreadsheet importers can discard a BOM, control character or
+// space before they decide whether a cell is a formula: " =1" and "\ufeff=1" are
+// formulas too. A cell that had such a prefix always gains the apostrophe, and
+// the prefix itself is dropped. Numbers are written by us and never pass through
+// here, so a negative amount stays a number.
 func csvText(s string) string {
-	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
-		return "'" + s
+	clean := strings.TrimLeftFunc(s, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) })
+	prefix := len(clean) != len(s)
+	if prefix || (len(clean) > 0 && strings.ContainsRune("=+-@", rune(clean[0]))) {
+		return "'" + clean
 	}
 	return s
 }

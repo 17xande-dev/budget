@@ -5,6 +5,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/17xande-dev/budget/internal/importer"
+	"github.com/17xande-dev/budget/internal/ledger"
 )
 
 // A merchant names itself; a description beginning "=" must reach a spreadsheet
@@ -68,7 +72,6 @@ func TestTransactionsCSV(t *testing.T) {
 	if !descs[`'=HYPERLINK("http://evil.example","click")`] || !descs["'@SUM(A1:A9)"] || !descs["PLAIN SHOP"] {
 		t.Errorf("descriptions not escaped as expected: %v", descs)
 	}
-
 	// The page's link exports what the page shows: here the latest month only.
 	page := owner.get("/transactions").body
 	if !strings.Contains(page, `href="/transactions.csv?month=2026-10"`) {
@@ -77,5 +80,37 @@ func TestTransactionsCSV(t *testing.T) {
 	month := owner.get("/transactions.csv?month=2026-10&q=plain")
 	if rows, _ := csv.NewReader(strings.NewReader(month.body)).ReadAll(); len(rows) != 2 || rows[1][2] != "PLAIN SHOP" {
 		t.Errorf("filtered export: %v", rows)
+	}
+}
+
+// A spreadsheet importer can drop a leading space or BOM before it decides a cell
+// is a formula, so a description that starts with one must be defused too, with
+// the invisible prefix removed. The statement importer collapses and trims
+// whitespace, so a stored description cannot be fed through an upload here: it is
+// written with the ledger store, the same call the upload makes, and read back
+// through the real download route.
+func TestTransactionsCSVDefusesHiddenPrefixFormulas(t *testing.T) {
+	e := newEnv(t)
+	owner := e.claim()
+	st := importer.Statement{AccountRef: "62000000009", AccountLabel: "Cheque Acc", Format: "csv", Txns: []importer.Txn{
+		{Date: "2026-10-04", AmountCents: -4000, Description: " =1"},
+		{Date: "2026-10-05", AmountCents: -5000, Description: "\ufeff=HYPERLINK(1)"},
+		{Date: "2026-10-06", AmountCents: -6000, Description: "PLAIN SHOP"},
+	}}
+	if _, err := ledger.NewStore(e.db).Import(st, ledger.SourceUpload, "hidden.csv", 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	r := owner.get("/transactions.csv?month=all")
+	rows, err := csv.NewReader(strings.NewReader(r.body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descs := map[string]bool{}
+	for _, row := range rows[1:] {
+		descs[row[2]] = true
+	}
+	if !descs["'=1"] || !descs["'=HYPERLINK(1)"] || !descs["PLAIN SHOP"] {
+		t.Errorf("hidden-prefix formulas not escaped: %v", descs)
 	}
 }
