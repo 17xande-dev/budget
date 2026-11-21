@@ -181,10 +181,22 @@ func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
 	if err != nil {
 		return err
 	}
+	strict, err := strictTables(ctx, live)
+	if err != nil {
+		return err
+	}
 	for _, table := range sortedKeys(want) {
 		have, ok := got[table]
 		if !ok {
 			return mismatch("table %s is missing", table)
+		}
+		// STRICT cannot be retrofitted: the baseline's CREATE TABLE IF NOT EXISTS
+		// ... STRICT did nothing to a table that already existed, so a live table
+		// can have every column right and still accept "banana" in an INTEGER.
+		// Adopting it would pin that for ever, so it is refused, not rebuilt.
+		if !strict[table] {
+			return mismatch("table %s is not STRICT, and STRICT cannot be retrofitted in place: "+
+				"it needs a table rebuild (create, copy, drop, rename) done by hand", table)
 		}
 		for _, name := range sortedKeys(want[table]) {
 			w := want[table][name]
@@ -207,6 +219,25 @@ func verifyBaseline(ctx context.Context, live *sql.DB, files fs.FS) error {
 func mismatch(format string, args ...any) error {
 	return errors.New("the database does not match the baseline schema, so it is not adopted: " +
 		fmt.Sprintf(format, args...) + ". Restore a database that matches, or recreate it with `make recreate-db`")
+}
+
+// strictTables reports which tables of d are STRICT, from pragma_table_list.
+func strictTables(ctx context.Context, d *sql.DB) (map[string]bool, error) {
+	rows, err := d.QueryContext(ctx, `SELECT name, strict FROM pragma_table_list WHERE schema = 'main'`)
+	if err != nil {
+		return nil, fmt.Errorf("read table list: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		var strict int
+		if err := rows.Scan(&name, &strict); err != nil {
+			return nil, err
+		}
+		out[name] = strict != 0
+	}
+	return out, rows.Err()
 }
 
 func columnsByTable(ctx context.Context, d *sql.DB) (map[string]map[string]column, error) {

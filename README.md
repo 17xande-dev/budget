@@ -198,8 +198,10 @@ migrations in `internal/db/migrations/`, applied at startup through
 `sqlitekit/goosestrict` (its version table is STRICT too). `0001_baseline.sql` is the
 schema as it was before goose; a database made by the old `CREATE TABLE IF NOT EXISTS`
 script is adopted at version 1 once, and only after every table and column of the
-baseline is verified to exist in it with the same type, NOT NULL and primary key. A
-mismatch refuses to start and names the table and column. A database written by a newer
+baseline is verified to exist in it with the same type, NOT NULL and primary key,
+and every table to be STRICT (which cannot be retrofitted: a non-strict table is refused
+for a rebuild by hand, never rebuilt automatically). A mismatch refuses to start and
+names the table and column. A database written by a newer
 build is refused too. A schema change is a new numbered file, never an edit to an
 applied one. `make recreate-db` remains the way to throw a local database away.
 Money is integer cents.

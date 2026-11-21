@@ -209,6 +209,11 @@ func TestAdoptionRefusesASchemaMismatch(t *testing.T) {
 		{"primary key dropped", func(s string) string {
 			return strings.Replace(s, "	token_hash TEXT PRIMARY KEY,", "	token_hash TEXT NOT NULL,", 1)
 		}, "sessions.token_hash has primary key position 0"},
+		{"not strict", func(s string) string {
+			// rules has only INTEGER and TEXT columns with explicit NOT NULL, so
+			// dropping STRICT changes nothing else the column comparison could see.
+			return strings.Replace(s, ") STRICT;\n\n-- How much a category may take", ");\n\n-- How much a category may take", 1)
+		}, "table rules is not STRICT"},
 		{"required column", func(s string) string {
 			return strings.Replace(s, "	fetch      INTEGER NOT NULL DEFAULT 1 CHECK (fetch IN (0, 1)),\n", "", 1)
 		}, "accounts.fetch"},
