@@ -29,6 +29,11 @@ var Options = sqlitekit.Options{}
 // checkSettings is a variable only so a test can prove Open runs it.
 var checkSettings = sqlitekit.Check
 
+// lockMigrations is a variable only so a test can prove the race the lock closes.
+var lockMigrations = func(ctx context.Context, path string) (func() error, error) {
+	return sqlitekit.MigrationLock(ctx, path)
+}
+
 // The schema is goose migrations under migrations/, embedded. Every table is
 // STRICT: SQLite otherwise applies "type affinity" and will happily store the
 // string "banana" in an INTEGER column. Every column is therefore TEXT or
@@ -73,6 +78,15 @@ func Open(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// Held from before the first query (the first connection of a fresh file is not
+	// covered by busy_timeout) until the schema is final, so two processes starting
+	// together (a Kamal overlap, the app and `reset-password`) cannot both adopt or
+	// both run the baseline. Released on every return path, success included.
+	release, err := lockMigrations(context.Background(), path)
+	if err != nil {
+		return nil, fmt.Errorf("lock %s for migration: %w", path, err)
+	}
+	defer release()
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

@@ -126,6 +126,11 @@ torn or miss them. Take a backup through the app (the `backups/` folder above, m
 `VACUUM INTO`), or stop the app first. The image is distroless, so it has no `sqlite3` CLI
 for `.backup`.
 
+A fourth file, `budget.db.migrate-lock`, sits beside the database: startup takes an
+exclusive lock on it so two processes opening the database together (a Kamal overlap, or
+the app and `reset-password`) cannot both adopt or migrate it. It is empty and harmless;
+do not delete it while the app runs.
+
 To restore one, stop the app and copy the chosen backup over the database inside the
 volume. The image has no shell, so a throwaway busybox on the volume does the copy
 (overwriting keeps the file's owner, the app's non-root user 65532). The stale `-wal` and

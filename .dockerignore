@@ -6,6 +6,7 @@
 *.db
 *.db-wal
 *.db-shm
+*.migrate-lock
 *.ofx
 *.qif
 *.zip

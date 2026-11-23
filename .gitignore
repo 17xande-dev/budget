@@ -4,6 +4,7 @@
 *.db
 *.db-wal
 *.db-shm
+*.migrate-lock
 
 # Bank exports (CSV/OFX/ZIP) dropped here for importing or testing. Real
 # transactions; test fixtures are synthetic and live under testdata/.
