@@ -62,7 +62,14 @@ func newEnvWith(t *testing.T, cfg handler.Config) *env {
 		t.Fatal(err)
 	}
 	limit := func(h http.Handler) http.Handler { return h } // the per-IP limit has its own tests in internal/middleware
-	srv := httptest.NewServer(h.Server(middleware.RequireUser(users), limit, nil))
+	app := h.Server(middleware.RequireUser(users), limit, nil)
+	var srv *httptest.Server
+	if cfg.CookieSecure {
+		// The jar must carry Secure cookies back for the real login and logout POSTs.
+		srv = httptest.NewTLSServer(app)
+	} else {
+		srv = httptest.NewServer(app)
+	}
 	t.Cleanup(srv.Close)
 	return &env{t: t, srv: srv, users: users, h: h, db: d}
 }
@@ -77,6 +84,7 @@ type browser struct {
 func (e *env) browser() *browser {
 	jar, _ := cookiejar.New(nil)
 	return &browser{e: e, c: &http.Client{
+		Transport:     e.srv.Client().Transport,
 		Jar:           jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}

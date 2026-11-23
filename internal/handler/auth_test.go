@@ -190,3 +190,75 @@ func TestFailedLoginLogsOnlyAccountIDAndClientIP(t *testing.T) {
 		t.Error("known-account failure did not log the user ID and resolved IP")
 	}
 }
+
+func TestAuthCookieAttributes(t *testing.T) {
+	const ttl = 2 * time.Hour
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("secure=%t", secure), func(t *testing.T) {
+			e := newEnvWith(t, handler.Config{SessionTTL: ttl, CookieSecure: secure})
+			e.claim()
+			b := e.browser()
+
+			loginPage := b.get("/login")
+			if loginPage.code != http.StatusOK {
+				t.Fatalf("GET /login: got %d, want 200", loginPage.code)
+			}
+			csrf := requireCookie(t, "GET /login", loginPage, "csrf_token")
+			assertAuthCookieAttributes(t, "GET /login", csrf, secure)
+			if csrf.Value == "" {
+				t.Error("GET /login: CSRF cookie is empty")
+			}
+
+			earliestExpiry := time.Now().Add(ttl).Truncate(time.Second)
+			login := b.login("owner@example.com", ownerPassword)
+			if login.code != http.StatusSeeOther || login.loc != "/" {
+				t.Fatalf("POST /login: got %d -> %q, want 303 -> /", login.code, login.loc)
+			}
+			session := requireCookie(t, "POST /login", login, "budget_session")
+			assertAuthCookieAttributes(t, "POST /login", session, secure)
+			latestExpiry := time.Now().Add(ttl)
+			if session.Value == "" || session.MaxAge != int(ttl.Seconds()) ||
+				session.Expires.Before(earliestExpiry) || session.Expires.After(latestExpiry) {
+				t.Errorf("POST /login: nonempty=%t MaxAge=%d Expires=%s, want a nonempty %s session",
+					session.Value != "", session.MaxAge, session.Expires, ttl)
+			}
+
+			logout := b.post("/", "/logout", nil)
+			if logout.code != http.StatusSeeOther || logout.loc != "/login" {
+				t.Fatalf("POST /logout: got %d -> %q, want 303 -> /login", logout.code, logout.loc)
+			}
+			cleared := requireCookie(t, "POST /logout", logout, "budget_session")
+			assertAuthCookieAttributes(t, "POST /logout", cleared, secure)
+			if cleared.Value != "" || cleared.MaxAge >= 0 || !cleared.Expires.IsZero() {
+				t.Errorf("POST /logout: empty=%t MaxAge=%d Expires=%s, want an empty cookie with negative MaxAge and no Expires",
+					cleared.Value == "", cleared.MaxAge, cleared.Expires)
+			}
+		})
+	}
+}
+
+func requireCookie(t *testing.T, route string, r resp, name string) *http.Cookie {
+	t.Helper()
+	var found *http.Cookie
+	for _, c := range (&http.Response{Header: r.hdr}).Cookies() {
+		if c.Name != name {
+			continue
+		}
+		if found != nil {
+			t.Fatalf("%s: sent more than one %q cookie", route, name)
+		}
+		found = c
+	}
+	if found == nil {
+		t.Fatalf("%s: did not send %q cookie", route, name)
+	}
+	return found
+}
+
+func assertAuthCookieAttributes(t *testing.T, route string, c *http.Cookie, secure bool) {
+	t.Helper()
+	if c.Path != "/" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Secure != secure {
+		t.Errorf("%s %s: Path=%q HttpOnly=%t SameSite=%v Secure=%t, want Path=/ HttpOnly SameSite=Lax Secure=%t",
+			route, c.Name, c.Path, c.HttpOnly, c.SameSite, c.Secure, secure)
+	}
+}
