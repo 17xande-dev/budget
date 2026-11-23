@@ -29,12 +29,12 @@ func validatePasswordHash(hash string) error {
 	return password.Validate(hash)
 }
 
-func checkPassword(ctx context.Context, hash, pw string) bool {
+func checkPassword(ctx context.Context, hash, pw string) (ok, rehash bool) {
 	if !strings.HasPrefix(hash, "$argon2id$") {
-		return false
+		return false, false
 	}
 	// A malformed stored hash is indistinguishable from a wrong password to
 	// the visitor, and must count toward the same login rate limit.
-	ok, _, err := password.Check(ctx, hash, pw)
-	return err == nil && ok
+	ok, rehash, err := password.Check(ctx, hash, pw)
+	return err == nil && ok, err == nil && rehash
 }

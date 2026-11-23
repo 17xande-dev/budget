@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/17xande-dev/password"
@@ -61,15 +62,41 @@ func (s *Store) Authenticate(ctx context.Context, email, pw string, now time.Tim
 	case err != nil:
 		return User{}, false, fmt.Errorf("find user: %w", err)
 	}
-	if !checkPassword(ctx, hash, pw) {
+	ok, rehash := checkPassword(ctx, hash, pw)
+	if !ok {
 		return User{}, false, nil
 	}
-	if _, err := s.db.Exec(`UPDATE users SET last_login_at = ? WHERE id = ?`, formatTime(now), u.ID); err != nil {
-		// The sign-in succeeded; failed bookkeeping is not worth refusing it over.
-		return u, true, nil
+	// The sign-in succeeded; failed bookkeeping is not worth refusing it over.
+	if _, err := s.db.Exec(`UPDATE users SET last_login_at = ? WHERE id = ?`, formatTime(now), u.ID); err == nil {
+		u.LastLoginAt = now.UTC()
 	}
-	u.LastLoginAt = now.UTC()
+	if rehash {
+		// A reset or another sign-in may have changed the hash since we
+		// verified it. Losing the upgrade must not undo a successful login.
+		if err := s.upgradePasswordHash(ctx, u.ID, hash, pw); err != nil {
+			log.Printf("login: password hash upgrade failed: user_id=%d: %v", u.ID, err)
+		}
+	}
 	return u, true, nil
+}
+
+func (s *Store) upgradePasswordHash(ctx context.Context, id int64, oldHash, pw string) error {
+	hash, err := HashPassword(ctx, pw)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?`, hash, id, oldHash)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("stored password hash changed")
+	}
+	return nil
 }
 
 // ErrEmailTaken is returned when the email is already in use, so a caller can turn
@@ -164,7 +191,8 @@ func (s *Store) CheckUserPassword(ctx context.Context, id int64, pw string) (boo
 	if err != nil {
 		return false, fmt.Errorf("read password hash for user %d: %w", id, err)
 	}
-	return checkPassword(ctx, hash, pw), nil
+	ok, _ := checkPassword(ctx, hash, pw)
+	return ok, nil
 }
 
 // SetPassword replaces a user's password and deletes all their sessions and API
