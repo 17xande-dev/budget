@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/17xande-dev/budget/internal/budget"
 	"github.com/17xande-dev/budget/internal/importer"
 	"github.com/17xande-dev/budget/internal/ledger"
 )
@@ -112,5 +113,63 @@ func TestTransactionsCSVDefusesHiddenPrefixFormulas(t *testing.T) {
 	}
 	if !descs["'=1"] || !descs["'=HYPERLINK(1)"] || !descs["PLAIN SHOP"] {
 		t.Errorf("hidden-prefix formulas not escaped: %v", descs)
+	}
+}
+
+// The account and category names are staff-typed (an account can be renamed, a
+// category created), so each export column that carries one must be defused by its
+// own call: the description test above would stay green if the account or
+// category cell were written raw. Each column is checked on its own, through the
+// real download route.
+func TestTransactionsCSVDefusesAccountAndCategoryNames(t *testing.T) {
+	e := newEnv(t)
+	owner := e.claim()
+	led, bud := ledger.NewStore(e.db), budget.NewStore(e.db)
+	st := importer.Statement{AccountRef: "62000000009", AccountLabel: "Cheque Acc", Format: "csv", Txns: []importer.Txn{
+		{Date: "2026-10-04", AmountCents: -4000, Description: "SHOP ONE"},
+		{Date: "2026-10-05", AmountCents: -5000, Description: "SHOP TWO"},
+	}}
+	if _, err := led.Import(st, ledger.SourceUpload, "names.csv", 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	accts, err := led.Accounts()
+	if err != nil || len(accts) != 1 {
+		t.Fatalf("accounts: %v, %v", accts, err)
+	}
+	if ok, err := led.UpdateAccount(accts[0].ID, "=HYPERLINK(1)", accts[0].Kind); err != nil || !ok {
+		t.Fatalf("rename account: %v, %v", ok, err)
+	}
+	actor := budget.Actor{UserID: 1, Via: budget.ViaWeb}
+	txns, err := led.Transactions(ledger.Filter{}, 10)
+	if err != nil || len(txns) != 2 {
+		t.Fatalf("transactions: %v, %v", txns, err)
+	}
+	for i, name := range []string{"@SUM(A1:A9)", "\t+cmd"} { // CleanName trims the tab; the "+" must still be defused
+		c, err := bud.CreateCategory(name, budget.KindExpense, actor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bud.Categorise(txns[i].ID, c.ID, actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := owner.get("/transactions.csv?month=all")
+	rows, err := csv.NewReader(strings.NewReader(r.body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want a header and 2 rows, got %v", rows)
+	}
+	cats := map[string]bool{}
+	for _, row := range rows[1:] {
+		if row[1] != "'=HYPERLINK(1)" {
+			t.Errorf("account cell %q, want the formula defused as '=HYPERLINK(1)", row[1])
+		}
+		cats[row[5]] = true
+	}
+	if !cats["'@SUM(A1:A9)"] || !cats["'+cmd"] {
+		t.Errorf("category cells not defused: %v", cats)
 	}
 }
