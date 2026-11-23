@@ -138,12 +138,16 @@ status command and the cmd tools fail with permission denied.
 To restore one, stop the app and copy the chosen backup over the database inside the
 volume. The image has no shell, so a throwaway busybox on the volume does the copy
 (overwriting keeps the file's owner, the app's non-root user 65532). The stale `-wal` and
-`-shm` files go too: a leftover `-wal` would be replayed onto the restored file. In
+`-shm` files go too: a leftover `-wal` would be replayed onto the restored file. The
+database it replaces is kept as `budget.db.before-restore` (0600), and the command stops
+before changing anything if that file already exists, so a repeat cannot overwrite your
+only copy: move it aside first. It is a copy of `budget.db` alone, so let `kamal app stop`
+finish first: an app that was killed may hold recent commits only in the `-wal` file. In
 production:
 
 ```sh
 kamal app stop
-kamal server exec "docker run --rm -v budget_budget-data:/data busybox sh -c 'rm -f /data/budget.db-wal /data/budget.db-shm && cp /data/backups/budget-2026-10-05.db /data/budget.db && chown 65532:65532 /data/budget.db'"
+kamal server exec "docker run --rm -v budget_budget-data:/data busybox sh -c 'set -e; test ! -e /data/budget.db.before-restore; cp /data/budget.db /data/budget.db.before-restore; chmod 600 /data/budget.db.before-restore; rm -f /data/budget.db-wal /data/budget.db-shm; cp /data/backups/budget-2026-10-05.db /data/budget.db; chown 65532:65532 /data/budget.db /data/budget.db.before-restore'"
 kamal app start
 ```
 
@@ -156,7 +160,7 @@ With the local `compose.yaml` stack (volume `budget-data`) the same steps are:
 docker compose cp budget:/data/backups ./budget-backups   # copy backups off
 docker compose stop budget
 docker run --rm --volumes-from "$(docker compose ps -aq budget)" busybox \
-  sh -c 'rm -f /data/budget.db-wal /data/budget.db-shm && cp /data/backups/budget-2026-10-05.db /data/budget.db && chown 65532:65532 /data/budget.db'
+  sh -c 'set -e; test ! -e /data/budget.db.before-restore; cp /data/budget.db /data/budget.db.before-restore; chmod 600 /data/budget.db.before-restore; rm -f /data/budget.db-wal /data/budget.db-shm; cp /data/backups/budget-2026-10-05.db /data/budget.db; chown 65532:65532 /data/budget.db /data/budget.db.before-restore'
 docker compose start budget
 ```
 
