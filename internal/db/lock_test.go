@@ -1,10 +1,15 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/17xande-dev/sqlitekit"
 )
 
 // openConcurrently opens path from n goroutines released together and fails the
@@ -53,6 +58,41 @@ func requireEachVersionOnce(t *testing.T, path string, want int) {
 	}
 	if rows != distinct || rows != want {
 		t.Errorf("goose_db_version has %d rows, %d distinct versions; want %d, each once", rows, distinct, want)
+	}
+}
+
+// A lock held by a stuck process must make Open fail, not hang the start for ever.
+func TestOpenGivesUpWhenTheMigrationLockStaysHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "held.db")
+	release, err := sqlitekit.MigrationLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	old := lockWait
+	lockWait = 100 * time.Millisecond
+	defer func() { lockWait = old }()
+
+	done := make(chan error, 1)
+	go func() {
+		d, err := Open(path)
+		if err == nil {
+			d.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Open succeeded while another process held the migration lock")
+		}
+		for _, want := range []string{"held by another process", path + sqlitekit.MigrationLockSuffix} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Open is still waiting for the migration lock well past its bound")
 	}
 }
 

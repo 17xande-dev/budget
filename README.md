@@ -129,7 +129,8 @@ for `.backup`.
 A fourth file, `budget.db.migrate-lock`, sits beside the database: startup takes an
 exclusive lock on it so two processes opening the database together (a Kamal overlap, or
 the app and `reset-password`) cannot both adopt or migrate it. It is empty and harmless;
-do not delete it while the app runs.
+do not delete it while the app runs. Startup waits for it for at most a minute, then fails
+saying another process holds it.
 
 To restore one, stop the app and copy the chosen backup over the database inside the
 volume. The image has no shell, so a throwaway busybox on the volume does the copy

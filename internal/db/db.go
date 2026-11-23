@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/17xande-dev/sqlitekit"
 	"github.com/17xande-dev/sqlitekit/goosestrict"
@@ -33,6 +34,11 @@ var checkSettings = sqlitekit.Check
 var lockMigrations = func(ctx context.Context, path string) (func() error, error) {
 	return sqlitekit.MigrationLock(ctx, path)
 }
+
+// lockWait bounds the wait for the migration lock, as in the other apps that use
+// sqlitekit: a process that holds it for longer is stuck, and a start that waits
+// for ever hides that. A variable only so a test need not wait a minute.
+var lockWait = time.Minute
 
 // The schema is goose migrations under migrations/, embedded. Every table is
 // STRICT: SQLite otherwise applies "type affinity" and will happily store the
@@ -82,8 +88,15 @@ func Open(path string) (*sql.DB, error) {
 	// covered by busy_timeout) until the schema is final, so two processes starting
 	// together (a Kamal overlap, the app and `reset-password`) cannot both adopt or
 	// both run the baseline. Released on every return path, success included.
-	release, err := lockMigrations(context.Background(), path)
+	lockCtx, cancel := context.WithTimeout(context.Background(), lockWait)
+	release, err := lockMigrations(lockCtx, path)
+	cancel()
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("lock %s for migration: gave up after %s: the lock is held by another process "+
+				"(lock file %s): is another copy of the app or a command still starting?: %w",
+				path, lockWait, path+sqlitekit.MigrationLockSuffix, err)
+		}
 		return nil, fmt.Errorf("lock %s for migration: %w", path, err)
 	}
 	defer release()
