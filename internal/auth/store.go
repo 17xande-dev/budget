@@ -48,6 +48,8 @@ func scanUser(row interface{ Scan(...any) error }, extra ...any) (User, error) {
 
 // Authenticate verifies an email and password. The bool is false for an unknown
 // email or a wrong password -- the caller must not distinguish them to the visitor.
+// On a wrong password the returned User contains only the ID, for logging; an
+// unknown account returns a zero User.
 //
 // On success it records the login time, which is what tells you whether an
 // account is still in use.
@@ -64,7 +66,7 @@ func (s *Store) Authenticate(ctx context.Context, email, pw string, now time.Tim
 	}
 	ok, rehash := checkPassword(ctx, hash, pw)
 	if !ok {
-		return User{}, false, nil
+		return User{ID: u.ID}, false, nil
 	}
 	// The sign-in succeeded; failed bookkeeping is not worth refusing it over.
 	if _, err := s.db.Exec(`UPDATE users SET last_login_at = ? WHERE id = ?`, formatTime(now), u.ID); err == nil {

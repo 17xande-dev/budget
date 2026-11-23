@@ -10,6 +10,7 @@ import (
 	"github.com/17xande-dev/budget/internal/auth"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/budget/internal/validate"
+	"github.com/17xande-dev/ratelimit"
 	"github.com/17xande-dev/websec"
 )
 
@@ -80,9 +81,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		h.loginByEmail.Allow(emailKey)
-		// Logged without the password, with the address, so a typo can be told
-		// from someone working through a list.
-		log.Printf("login failed for %q", email)
+		// Account IDs and IP keys let operators recognize repeated failures
+		// without logging what might be a password pasted in the email field.
+		ip := ratelimit.IPKey(h.clientIPSource.Addr(r))
+		if user.ID == 0 {
+			log.Printf("failed login: unknown account client_ip=%s", ip)
+		} else {
+			log.Printf("failed login user_id=%d client_ip=%s", user.ID, ip)
+		}
 		fail(http.StatusUnauthorized, "Email or password is incorrect.")
 		return
 	}

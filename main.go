@@ -102,10 +102,11 @@ func serve(cfg config.Config) error {
 		Minute:   cfg.FNB.Minute,
 	})
 	h, err := handler.New(users, led, bud, handler.Config{
-		Fetcher:      fetcher,
-		Backups:      backups(cfg),
-		CookieSecure: cfg.CookieSecure,
-		SessionTTL:   cfg.SessionTTL,
+		Fetcher:        fetcher,
+		Backups:        backups(cfg),
+		CookieSecure:   cfg.CookieSecure,
+		SessionTTL:     cfg.SessionTTL,
+		ClientIPSource: cfg.ClientIPSource,
 	})
 	if err != nil {
 		return fmt.Errorf("init handler: %w", err)

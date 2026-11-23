@@ -1,11 +1,21 @@
 package handler_test
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
+	"testing/cryptotest"
 	"time"
 
+	"github.com/17xande-dev/budget/internal/handler"
 	"github.com/17xande-dev/password"
+	"github.com/17xande-dev/ratelimit/clientip"
 )
 
 const rehashEmail = "legacy@example.com"
@@ -103,5 +113,80 @@ func TestLoginSucceedsIfHashUpgradeWriteFails(t *testing.T) {
 	requireUsableLogin(t, e, ownerPassword)
 	if got := storedLoginHash(t, e, id); got != legacy {
 		t.Fatal("failed upgrade changed the stored hash")
+	}
+}
+
+func TestFailedLoginLogsOnlyAccountIDAndClientIP(t *testing.T) {
+	source, err := clientip.ParseSource("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEnvWith(t, handler.Config{SessionTTL: time.Hour, ClientIPSource: source})
+	e.claim()
+	b := e.browser()
+	token := b.token("/login")
+
+	f, err := os.CreateTemp(t.TempDir(), "login-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	old := log.Writer()
+	log.SetOutput(f)
+	t.Cleanup(func() { log.SetOutput(old) })
+
+	const secret = "secret-pw-123"
+	const email = "second@example.com"
+	const ip = "203.0.113.7"
+	attempt := func(address string) resp {
+		t.Helper()
+		form := url.Values{"email": {address}, "password": {"wrong password"}, "csrf_token": {token}}
+		req, err := http.NewRequest(http.MethodPost, e.srv.URL+"/login", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", e.srv.URL)
+		req.Header.Set("CF-Connecting-IP", ip)
+		// The response's CSRF mask changes on each request. Hold it fixed
+		// so only account existence could change the bytes of the response.
+		cryptotest.SetGlobalRandom(t, 1)
+		r := b.do(req)
+		if r.code != http.StatusUnauthorized {
+			t.Fatalf("failed login returned %d, want 401", r.code)
+		}
+		return r
+	}
+	attempt(secret)
+	unknown := attempt(email)
+	hash, err := password.Hash(t.Context(), ownerPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := e.users.CreateUser(email, "Second", hash, false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := attempt(email)
+	if unknown.body != known.body {
+		t.Error("response body changed when the submitted address became known")
+	}
+
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := string(data)
+	sum := sha256.Sum256([]byte(secret))
+	for _, forbidden := range []string{secret, fmt.Sprintf("%x", sum), base64.RawURLEncoding.EncodeToString(sum[:]), email} {
+		if strings.Contains(logged, forbidden) {
+			t.Error("failed login log contains the submitted value or its hash")
+		}
+	}
+	if n := strings.Count(logged, "unknown account client_ip="+ip); n != 2 {
+		t.Errorf("got %d unknown-account entries with the resolved IP, want 2", n)
+	}
+	if !strings.Contains(logged, fmt.Sprintf("failed login user_id=%d client_ip=%s", u.ID, ip)) {
+		t.Error("known-account failure did not log the user ID and resolved IP")
 	}
 }

@@ -14,14 +14,16 @@ import (
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/ratelimit"
+	"github.com/17xande-dev/ratelimit/clientip"
 	"github.com/17xande-dev/sqlitekit"
 	"github.com/justinas/nosurf"
 	"golang.org/x/time/rate"
 )
 
 type Config struct {
-	CookieSecure bool
-	SessionTTL   time.Duration
+	CookieSecure   bool
+	SessionTTL     time.Duration
+	ClientIPSource clientip.Source
 	// Fetcher is the FNB fetch, for its status page; nil leaves the page saying
 	// the fetch is not available.
 	Fetcher *fetch.Fetcher
@@ -31,11 +33,12 @@ type Config struct {
 }
 
 type Handler struct {
-	users        *auth.Store
-	ledger       *ledger.Store
-	budget       *budget.Store
-	cookieSecure bool
-	sessionTTL   time.Duration
+	users          *auth.Store
+	ledger         *ledger.Store
+	budget         *budget.Store
+	cookieSecure   bool
+	sessionTTL     time.Duration
+	clientIPSource clientip.Source
 
 	tmpls  map[string]*template.Template
 	assets map[string]staticAsset
@@ -56,13 +59,14 @@ type Handler struct {
 
 func New(users *auth.Store, led *ledger.Store, bud *budget.Store, cfg Config) (*Handler, error) {
 	h := &Handler{
-		users:        users,
-		ledger:       led,
-		budget:       bud,
-		cookieSecure: cfg.CookieSecure,
-		sessionTTL:   cfg.SessionTTL,
-		fetcher:      cfg.Fetcher,
-		backups:      cfg.Backups,
+		users:          users,
+		ledger:         led,
+		budget:         bud,
+		cookieSecure:   cfg.CookieSecure,
+		sessionTTL:     cfg.SessionTTL,
+		clientIPSource: cfg.ClientIPSource,
+		fetcher:        cfg.Fetcher,
+		backups:        cfg.Backups,
 	}
 	var err error
 	// 30 minutes idle, as before: long enough for a bucket to have refilled.
