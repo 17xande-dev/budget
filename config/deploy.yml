@@ -47,6 +47,10 @@ env:
     # Cloudflare terminates https, so the browser always sees https and the
     # session cookie stays Secure (the default).
     COOKIE_SECURE: "true"
+    # The origin browsers use (proxy.host above, https because Cloudflare
+    # terminates TLS). Required while COOKIE_SECURE is true; the CSRF check
+    # compares a form post's Origin with it exactly.
+    PUBLIC_URL: https://budget.17xande.dev
     # Only the shared tunnel reaches kamal-proxy (it publishes nothing on the
     # host), and Cloudflare sets CF-Connecting-IP, so that header is the client's
     # address for the rate limits. Correct only while the tunnel is the sole way

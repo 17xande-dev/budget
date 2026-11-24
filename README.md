@@ -238,7 +238,8 @@ applied one. `make recreate-db` remains the way to throw a local database away.
 Money is integer cents.
 
 **Auth.** Two named accounts, no roles. Sessions are random tokens stored as
-sha256 in a table, so a password change ends every session. The first account is
+sha256 in a table, so a password change ends every session. A session ends
+`SESSION_TTL` (30 days) after sign-in at the latest, and after 7 days without use. The first account is
 claimed with a one-time token printed at boot, never a default password.
 
 **Security baseline.** A single CSP that is `'self'` except for the two font hosts (`https://fonts.googleapis.com` in `style-src` only, `https://fonts.gstatic.com` in `font-src` only), with no `'unsafe-inline'`, so no

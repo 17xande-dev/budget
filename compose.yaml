@@ -13,6 +13,8 @@ services:
       # plain FNB_PASSWORD environment variable (those leak into docker inspect).
       FNB_PASSWORD_FILE: /run/secrets/fnb_password
       CHROME_URL: ws://chrome:9222/
+      # The origin browsers use; the CSRF check compares a form post's Origin with it.
+      PUBLIC_URL: ${PUBLIC_URL:-https://${BUDGET_HOST}}
     secrets:
       - fnb_password
     volumes:
