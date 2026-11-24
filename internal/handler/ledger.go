@@ -19,7 +19,7 @@ import (
 	"github.com/17xande-dev/budget/internal/importer"
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
-	"github.com/justinas/nosurf"
+	"github.com/17xande-dev/websec/csrf"
 )
 
 // --- Transactions --------------------------------------------------------------
@@ -270,7 +270,7 @@ func (h *Handler) Categorise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.renderPartial(w, status, "txn_row", txnRow{
-		Txn: t, Categories: offered(cats, t.CategoryID.Int64), CSRFToken: nosurf.Token(r), Return: ret,
+		Txn: t, Categories: offered(cats, t.CategoryID.Int64), CSRFToken: csrf.Token(r), Return: ret,
 		OneAccount: r.PostFormValue("one_account") == "1", Saved: msg == "", Error: msg,
 	})
 }

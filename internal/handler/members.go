@@ -134,6 +134,9 @@ func (h *Handler) OwnPasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("password changed: %s", me.Email)
-	http.SetCookie(w, h.sessionCookie("", -time.Hour))
+	if !h.renewCSRF(w, r) {
+		return
+	}
+	h.session.Clear(w)
 	http.Redirect(w, r, "/login?notice=password_changed", http.StatusSeeOther)
 }

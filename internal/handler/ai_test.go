@@ -102,7 +102,7 @@ func TestOnlyMCPIsOutsideCSRF(t *testing.T) {
 	for _, m := range got {
 		lines = append(lines, m[1])
 	}
-	if want := []string{`"/mcp", mcpHandler`, `"/", csrf`}; !slices.Equal(lines, want) {
+	if want := []string{`"/mcp", mcpCapped`, `"/", protected`}; !slices.Equal(lines, want) {
 		t.Errorf("mounted outside nosurf: %q, want %q", lines, want)
 	}
 }

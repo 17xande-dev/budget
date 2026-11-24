@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/17xande-dev/budget/internal/auth"
+	"github.com/17xande-dev/websec/cookie"
 )
 
-// SessionCookieName is the session cookie. Its SameSite is always Lax and it is
-// HttpOnly; see the handler that sets it.
+// SessionCookieName is the session cookie's bare name; on https the cookie
+// policy (websec/cookie) adds the __Host- prefix. It is always HttpOnly and
+// SameSite=Lax.
 const SessionCookieName = "budget_session"
 
 // userKey is the context key the signed-in user is stored under. Unexported, so
@@ -39,11 +41,11 @@ func WithUser(r *http.Request, u auth.User) *http.Request {
 // where it was going in ?next=. An htmx request is not redirected -- swapping a
 // login page into a fragment of the current page makes a broken hybrid -- so it
 // gets a 401 and a header telling htmx to reload the page properly.
-func RequireUser(store *auth.Store) func(http.Handler) http.Handler {
+func RequireUser(store *auth.Store, session *cookie.Cookie) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if c, err := r.Cookie(SessionCookieName); err == nil {
-				u, ok, err := store.VerifySession(c.Value, time.Now())
+			if token, found := session.Value(r); found {
+				u, ok, err := store.VerifySession(token, time.Now())
 				if err != nil {
 					// A database failure is not an authentication failure;
 					// redirecting would send someone round a login loop with

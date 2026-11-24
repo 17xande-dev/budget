@@ -147,6 +147,7 @@ func TestSecretLimitUsesConfiguredClientIPSource(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
 	build := func(env string) http.Handler {
 		t.Setenv("CLIENT_IP_SOURCE", env)
+		t.Setenv("PUBLIC_URL", "https://budget.example.com")
 		cfg, err := config.Load()
 		if err != nil {
 			t.Fatal(err)

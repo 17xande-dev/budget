@@ -104,6 +104,7 @@ func serve(cfg config.Config) error {
 	h, err := handler.New(users, led, bud, handler.Config{
 		Fetcher:        fetcher,
 		Backups:        backups(cfg),
+		PublicOrigin:   cfg.PublicOrigin,
 		CookieSecure:   cfg.CookieSecure,
 		SessionTTL:     cfg.SessionTTL,
 		ClientIPSource: cfg.ClientIPSource,
@@ -125,7 +126,7 @@ func serve(cfg config.Config) error {
 		return fmt.Errorf("init mcp: %w", err)
 	}
 
-	app := h.Server(middleware.RequireUser(users), secretLimit, mcp.Handler())
+	app := h.Server(middleware.RequireUser(users, h.SessionCookie()), secretLimit, mcp.Handler())
 
 	srv := newServer(":"+cfg.Port, app)
 

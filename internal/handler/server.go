@@ -1,12 +1,46 @@
 package handler
 
 import (
-	"log"
 	"net/http"
 
 	"github.com/17xande-dev/budget/internal/middleware"
-	"github.com/justinas/nosurf"
+	"github.com/17xande-dev/websec/csrf"
 )
+
+// maxFormBytes bounds every request body except an import upload. The forms are
+// a few fields; nothing legitimate comes close.
+const maxFormBytes = 1 << 20
+
+// importPattern is the one route that accepts a multipart upload.
+const importPattern = "POST /import"
+
+// newCSRF builds the request-forgery policy before any handler exists, so the
+// sign-in, sign-out and password-change handlers can renew the token. origin is
+// the public origin browsers use; pattern reports the route the app's mux picks
+// (caps follow the pattern, never a prefix of the path).
+func newCSRF(origin string, secure bool, pattern func(*http.Request) string) (*csrf.Protect, error) {
+	return csrf.New(csrf.Config{
+		Origin:   origin,
+		Insecure: !secure,
+		MaxBody:  maxFormBytes,
+		Limit: func(r *http.Request) csrf.BodyLimit {
+			if pattern(r) == importPattern {
+				// MaxMemory is the whole cap, so an upload stays in memory and is
+				// never written to a temporary file; non-multipart bodies on this
+				// route keep the 1 MiB form cap.
+				return csrf.BodyLimit{MultipartMaxBytes: MaxUploadBytes, MaxMemory: MaxUploadBytes}
+			}
+			return csrf.BodyLimit{}
+		},
+		OnBodyError: func(w http.ResponseWriter, r *http.Request, status int) {
+			if status == http.StatusRequestEntityTooLarge {
+				http.Error(w, "That upload is too large.", status)
+				return
+			}
+			http.Error(w, http.StatusText(status), status)
+		},
+	})
+}
 
 // Server composes the whole HTTP stack: routes, CSRF, security headers. It lives
 // here rather than in main so the tests exercise exactly the stack production
@@ -17,53 +51,36 @@ import (
 func (h *Handler) Server(protect, limit func(http.Handler) http.Handler, mcpHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	h.Register(mux, protect, limit)
+	h.mux.Store(mux)
 
-	csrf := nosurf.New(mux)
-	csrf.SetFailureHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("csrf refused %s %s: %v", r.Method, r.URL.Path, nosurf.Reason(r))
-		http.Error(w, "The form expired or came from another site. Go back, reload the page and try again.",
-			http.StatusForbidden)
-	}))
-	// nosurf compares a POST's Origin against the request's own host and assumes
-	// https when doing so. Behind Traefik the connection reaching us is plain http
-	// while the browser's origin is https, so CookieSecure -- "this deployment is
-	// https" -- is the right signal rather than r.TLS. Without this, plain-http
-	// local development would 403 every form.
-	csrf.SetIsTLSFunc(func(*http.Request) bool { return h.cookieSecure })
-	csrf.SetBaseCookie(http.Cookie{Path: "/", HttpOnly: true, Secure: h.cookieSecure, SameSite: http.SameSiteLaxMode})
+	// The form-protection layer reads the whole form -- a multipart upload
+	// included -- before any handler runs, and caps it first (see newCSRF), so a
+	// limit inside a handler would come too late.
+	protected := h.csrf.Handler(mux)
 
 	// The MCP endpoint sits beside the CSRF layer, not inside it: it is
 	// authenticated by a bearer token alone, never a cookie, so there is no
-	// ambient credential for a forged request to ride on -- and nosurf would
-	// refuse every MCP client, which sends no CSRF token. A test pins these two
-	// lines, so nothing else gets mounted outside nosurf by accident.
+	// ambient credential for a forged request to ride on -- and the CSRF layer
+	// would refuse every MCP client, which sends no CSRF token. A test pins these
+	// two lines, so nothing else gets mounted outside it by accident.
 	root := http.NewServeMux()
 	if mcpHandler != nil {
-		root.Handle("/mcp", mcpHandler)
+		mcpCapped := capBody(mcpHandler, maxFormBytes)
+		root.Handle("/mcp", mcpCapped)
 	}
-	root.Handle("/", csrf)
+	root.Handle("/", protected)
 
 	// Security headers outermost, so they are on every response: a CSRF refusal
-	// and a 404 included. The body limit sits outside the CSRF layer because
-	// nosurf reads the form -- a whole multipart upload -- before any handler
-	// runs, so a limit inside a handler would come too late.
-	return middleware.SecurityHeaders(limitBodies(root))
+	// and a 404 included.
+	return middleware.SecurityHeaders(root)
 }
 
-// maxFormBytes bounds every request body except an import upload. The forms are
-// a few fields; nothing legitimate comes close.
-const maxFormBytes = 1 << 20
-
-// limitBodies refuses an oversized body up front when it declares its length,
-// and caps it as it is read when it does not.
-func limitBodies(next http.Handler) http.Handler {
+// capBody caps a request body the way it is read, and refuses one that declares
+// more up front. It guards /mcp, which sits outside the CSRF layer's caps.
+func capBody(next http.Handler, limit int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		limit := int64(maxFormBytes)
-		if r.Method == http.MethodPost && r.URL.Path == "/import" {
-			limit = MaxUploadBytes
-		}
 		if r.ContentLength > limit {
-			http.Error(w, "That upload is too large.", http.StatusRequestEntityTooLarge)
+			http.Error(w, "That request is too large.", http.StatusRequestEntityTooLarge)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit)

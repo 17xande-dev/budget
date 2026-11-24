@@ -203,7 +203,9 @@ func TestAuthCookieAttributes(t *testing.T) {
 			if loginPage.code != http.StatusOK {
 				t.Fatalf("GET /login: got %d, want 200", loginPage.code)
 			}
-			csrf := requireCookie(t, "GET /login", loginPage, "csrf_token")
+			// The kit names the CSRF cookie __Host-csrf_token on https.
+			csrfName := map[bool]string{true: "__Host-csrf_token", false: "csrf_token"}[secure]
+			csrf := requireCookie(t, "GET /login", loginPage, csrfName)
 			assertAuthCookieAttributes(t, "GET /login", csrf, secure)
 			if csrf.Value == "" {
 				t.Error("GET /login: CSRF cookie is empty")
@@ -214,10 +216,12 @@ func TestAuthCookieAttributes(t *testing.T) {
 			if login.code != http.StatusSeeOther || login.loc != "/" {
 				t.Fatalf("POST /login: got %d -> %q, want 303 -> /", login.code, login.loc)
 			}
-			session := requireCookie(t, "POST /login", login, "budget_session")
+			sessionName := map[bool]string{true: "__Host-budget_session", false: "budget_session"}[secure]
+			session := requireCookie(t, "POST /login", login, sessionName)
 			assertAuthCookieAttributes(t, "POST /login", session, secure)
 			latestExpiry := time.Now().Add(ttl)
-			if session.Value == "" || session.MaxAge != int(ttl.Seconds()) ||
+			// The kit floors Max-Age to whole seconds, so it may read a second short.
+			if session.Value == "" || session.MaxAge > int(ttl.Seconds()) || session.MaxAge < int(ttl.Seconds())-2 ||
 				session.Expires.Before(earliestExpiry) || session.Expires.After(latestExpiry) {
 				t.Errorf("POST /login: nonempty=%t MaxAge=%d Expires=%s, want a nonempty %s session",
 					session.Value != "", session.MaxAge, session.Expires, ttl)
@@ -227,10 +231,11 @@ func TestAuthCookieAttributes(t *testing.T) {
 			if logout.code != http.StatusSeeOther || logout.loc != "/login" {
 				t.Fatalf("POST /logout: got %d -> %q, want 303 -> /login", logout.code, logout.loc)
 			}
-			cleared := requireCookie(t, "POST /logout", logout, "budget_session")
+			cleared := requireCookie(t, "POST /logout", logout, sessionName)
 			assertAuthCookieAttributes(t, "POST /logout", cleared, secure)
-			if cleared.Value != "" || cleared.MaxAge >= 0 || !cleared.Expires.IsZero() {
-				t.Errorf("POST /logout: empty=%t MaxAge=%d Expires=%s, want an empty cookie with negative MaxAge and no Expires",
+			// The kit also sets Expires to the epoch, for clients that ignore Max-Age.
+			if cleared.Value != "" || cleared.MaxAge >= 0 || cleared.Expires.Unix() != 0 {
+				t.Errorf("POST /logout: empty=%t MaxAge=%d Expires=%s, want an empty cookie with negative MaxAge and an epoch Expires",
 					cleared.Value == "", cleared.MaxAge, cleared.Expires)
 			}
 		})

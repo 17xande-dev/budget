@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,13 @@ type Config struct {
 	// signal for the CSRF origin check, because behind a TLS-terminating proxy
 	// the connection reaching us is plain http while the browser's is not.
 	CookieSecure bool
+
+	// PublicOrigin is the origin browsers reach the app at (PUBLIC_URL reduced to
+	// lower-case scheme://host[:port]). The CSRF check compares a form post's
+	// Origin with it exactly, so it must be what the address bar shows. Required
+	// when cookies are Secure; plain-http development defaults to
+	// http://localhost:PORT.
+	PublicOrigin string
 
 	// SessionTTL is how long a sign-in lasts. Two people on their own devices,
 	// so the default is long; a password change ends every session regardless.
@@ -103,6 +111,12 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: COOKIE_SECURE must be true or false, got %q", v)
 	}
 
+	origin, err := publicOrigin(os.Getenv("PUBLIC_URL"), c.CookieSecure, c.Port)
+	if err != nil {
+		return Config{}, err
+	}
+	c.PublicOrigin = origin
+
 	// Beside the database by default, so the one volume holds both; that guards
 	// against a bad write or a mistaken delete, not a lost disk -- see README.
 	c.BackupDir = getenv("BACKUP_DIR", filepath.Join(filepath.Dir(c.DBPath), "backups"))
@@ -133,6 +147,37 @@ func Load() (Config, error) {
 		c.SetupToken = ""
 	}
 	return c, nil
+}
+
+// publicOrigin reduces PUBLIC_URL to the origin browsers send in a form post's
+// Origin header: lower-case scheme://host[:port], the scheme's default port
+// left out, no path. Anything else (userinfo, a path, a query) is refused rather
+// than guessed at: a wrong origin would 403 every form.
+func publicOrigin(raw string, secure bool, port string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if secure {
+			return "", errors.New("config: PUBLIC_URL is required while COOKIE_SECURE is true: " +
+				"set it to the address browsers use, e.g. https://budget.example.com")
+		}
+		return "http://localhost:" + port, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("config: PUBLIC_URL: %w", err)
+	}
+	scheme, host := strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+	switch {
+	case scheme != "http" && scheme != "https", host == "", u.User != nil,
+		(u.Path != "" && u.Path != "/"), u.RawQuery != "", u.Fragment != "", u.Opaque != "":
+		return "", fmt.Errorf("config: PUBLIC_URL must be a bare origin such as https://budget.example.com, got %q", raw)
+	case secure && scheme != "https":
+		return "", fmt.Errorf("config: PUBLIC_URL must be https while COOKIE_SECURE is true, got %q", raw)
+	}
+	if p := u.Port(); (scheme == "https" && p == "443") || (scheme == "http" && p == "80") {
+		host = strings.TrimSuffix(host, ":"+p)
+	}
+	return scheme + "://" + host, nil
 }
 
 func loadFNB(f *FNB) error {

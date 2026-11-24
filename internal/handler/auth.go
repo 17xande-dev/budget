@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/17xande-dev/budget/internal/auth"
-	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/budget/internal/validate"
 	"github.com/17xande-dev/ratelimit"
 	"github.com/17xande-dev/websec"
@@ -67,7 +66,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Checked before verifying, so a locked address costs no argon2 at all.
-	emailKey := loginEmailKey(email)
+	emailKey := ratelimit.AccountKey(email)
 	if h.loginByEmail.Exhausted(emailKey) {
 		fail(http.StatusTooManyRequests, "Too many failed attempts for this address. Wait a minute and try again.")
 		return
@@ -99,7 +98,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusInternalServerError, "Something went wrong signing you in. Please try again.")
 		return
 	}
-	http.SetCookie(w, h.sessionCookie(token, h.sessionTTL))
+	// A token seen before sign-in must not survive it.
+	if !h.renewCSRF(w, r) {
+		return
+	}
+	h.session.Set(w, token, time.Now().Add(h.sessionTTL))
 	log.Printf("signed in: %s", user.Email)
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
@@ -107,23 +110,26 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 // Logout deletes the session and clears the cookie. POST only: a GET would let
 // any page sign you out with an <img>.
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(middleware.SessionCookieName); err == nil {
-		if err := h.users.DeleteSession(c.Value); err != nil {
+	if token, ok := h.session.Value(r); ok {
+		if err := h.users.DeleteSession(token); err != nil {
 			// The cookie is cleared regardless, so this browser is signed out
 			// either way; the row outliving it is worth knowing about.
 			log.Printf("logout: delete session: %v", err)
 		}
 	}
-	http.SetCookie(w, h.sessionCookie("", -time.Hour))
+	if !h.renewCSRF(w, r) {
+		return
+	}
+	h.session.Clear(w)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (h *Handler) signedIn(r *http.Request) bool {
-	c, err := r.Cookie(middleware.SessionCookieName)
-	if err != nil {
+	token, ok := h.session.Value(r)
+	if !ok {
 		return false
 	}
-	_, ok, err := h.users.VerifySession(c.Value, time.Now())
+	_, ok, err := h.users.VerifySession(token, time.Now())
 	return err == nil && ok
 }
 
@@ -230,7 +236,10 @@ func (h *Handler) SetupClaim(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	http.SetCookie(w, h.sessionCookie(session, h.sessionTTL))
+	if !h.renewCSRF(w, r) {
+		return
+	}
+	h.session.Set(w, session, time.Now().Add(h.sessionTTL))
 	log.Printf("setup: %s claimed the first account", user.Email)
 	http.Redirect(w, r, homePath, http.StatusSeeOther)
 }

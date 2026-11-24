@@ -57,18 +57,27 @@ func newEnvWith(t *testing.T, cfg handler.Config) *env {
 	if _, err := users.CreateSetupToken(setupToken, time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	// The CSRF layer needs the public origin when the handler is built, so the
+	// server's listener is opened first and started once the handler exists.
+	srv := httptest.NewUnstartedServer(nil)
+	scheme := "http"
+	if cfg.CookieSecure {
+		scheme = "https"
+	}
+	if cfg.PublicOrigin == "" {
+		cfg.PublicOrigin = scheme + "://" + srv.Listener.Addr().String()
+	}
 	h, err := handler.New(users, ledger.NewStore(d), budget.NewStore(d), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	limit := func(h http.Handler) http.Handler { return h } // the per-IP limit has its own tests in internal/middleware
-	app := h.Server(middleware.RequireUser(users), limit, nil)
-	var srv *httptest.Server
+	srv.Config.Handler = h.Server(middleware.RequireUser(users, h.SessionCookie()), limit, nil)
 	if cfg.CookieSecure {
 		// The jar must carry Secure cookies back for the real login and logout POSTs.
-		srv = httptest.NewTLSServer(app)
+		srv.StartTLS()
 	} else {
-		srv = httptest.NewServer(app)
+		srv.Start()
 	}
 	t.Cleanup(srv.Close)
 	return &env{t: t, srv: srv, users: users, h: h, db: d}

@@ -3,9 +3,12 @@
 package handler
 
 import (
+	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/17xande-dev/budget/internal/auth"
@@ -16,11 +19,15 @@ import (
 	"github.com/17xande-dev/ratelimit"
 	"github.com/17xande-dev/ratelimit/clientip"
 	"github.com/17xande-dev/sqlitekit"
-	"github.com/justinas/nosurf"
+	"github.com/17xande-dev/websec/cookie"
+	"github.com/17xande-dev/websec/csrf"
 	"golang.org/x/time/rate"
 )
 
 type Config struct {
+	// PublicOrigin is the origin browsers reach the app at, lower-case
+	// scheme://host[:port] with no path (the CSRF check compares it exactly).
+	PublicOrigin   string
 	CookieSecure   bool
 	SessionTTL     time.Duration
 	ClientIPSource clientip.Source
@@ -39,6 +46,13 @@ type Handler struct {
 	cookieSecure   bool
 	sessionTTL     time.Duration
 	clientIPSource clientip.Source
+
+	// csrf and session are built in New, before any handler runs: sign-in,
+	// sign-out and password change renew the CSRF token through csrf. mux is
+	// the route table Server mounts, for csrf's per-route caps.
+	csrf    *csrf.Protect
+	session *cookie.Cookie
+	mux     atomic.Pointer[http.ServeMux]
 
 	tmpls  map[string]*template.Template
 	assets map[string]staticAsset
@@ -69,6 +83,18 @@ func New(users *auth.Store, led *ledger.Store, bud *budget.Store, cfg Config) (*
 		backups:        cfg.Backups,
 	}
 	var err error
+	if h.session, err = cookie.New(cookie.Config{Name: middleware.SessionCookieName, Insecure: !cfg.CookieSecure}); err != nil {
+		return nil, fmt.Errorf("session cookie: %w", err)
+	}
+	if h.csrf, err = newCSRF(cfg.PublicOrigin, cfg.CookieSecure, func(r *http.Request) string {
+		if m := h.mux.Load(); m != nil {
+			_, pattern := m.Handler(r)
+			return pattern
+		}
+		return ""
+	}); err != nil {
+		return nil, fmt.Errorf("csrf: %w", err)
+	}
 	// 30 minutes idle, as before: long enough for a bucket to have refilled.
 	if h.loginByEmail, err = newLoginByEmail(); err != nil {
 		return nil, err
@@ -120,7 +146,7 @@ func notice(r *http.Request) string {
 }
 
 func newPage(r *http.Request, title, nav string) page {
-	p := page{Title: title, CSRFToken: nosurf.Token(r), Notice: notice(r), Nav: nav}
+	p := page{Title: title, CSRFToken: csrf.Token(r), Notice: notice(r), Nav: nav}
 	p.Me, _ = middleware.User(r)
 	return p
 }
@@ -249,27 +275,20 @@ func (h *Handler) requireOwnPassword(next http.Handler) http.Handler {
 	})
 }
 
-// sessionCookie builds the session cookie, for setting and clearing it; a
-// negative ttl clears it.
-//
-// SameSite is always Lax: a credential must never ride along on a cross-site
-// request, leaving the CSRF token as the only thing in the way.
-func (h *Handler) sessionCookie(value string, ttl time.Duration) *http.Cookie {
-	c := &http.Cookie{
-		Name:     middleware.SessionCookieName,
-		Value:    value,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   h.cookieSecure,
-		SameSite: http.SameSiteLaxMode,
+// SessionCookie is the session cookie policy, for RequireUser to read the same
+// name the handlers set.
+func (h *Handler) SessionCookie() *cookie.Cookie { return h.session }
+
+// renewCSRF replaces the CSRF cookie when the credential changes (sign-in,
+// sign-out, own password change), so a token seen before it stops working. A
+// failure is a wiring bug (the request is not under the CSRF layer), so it is a 500.
+func (h *Handler) renewCSRF(w http.ResponseWriter, r *http.Request) bool {
+	if _, err := h.csrf.Renew(w, r); err != nil {
+		log.Printf("csrf: renew: %v", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return false
 	}
-	if ttl > 0 {
-		c.Expires = time.Now().Add(ttl)
-		c.MaxAge = int(ttl.Seconds())
-	} else {
-		c.MaxAge = -1
-	}
-	return c
+	return true
 }
 
 // newLoginByEmail is the tight per-email tier: five failures, then one more a

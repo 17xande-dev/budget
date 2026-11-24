@@ -9,7 +9,7 @@ import (
 // unseen address is refused (Allow and Exhausted both), not admitted untracked.
 // An address already tracked keeps using its own bucket.
 func TestLoginByEmailFailsClosedWhenFull(t *testing.T) {
-	h, err := New(nil, nil, nil, Config{})
+	h, err := New(nil, nil, nil, Config{PublicOrigin: "https://budget.example.com", CookieSecure: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,51 @@ import (
 	"time"
 )
 
+// Cookies default to Secure, which makes PUBLIC_URL required; the tests that are
+// not about it run with one set.
+func TestMain(m *testing.M) {
+	os.Setenv("PUBLIC_URL", "https://budget.example.com")
+	os.Exit(m.Run())
+}
+
+func TestPublicURL(t *testing.T) {
+	t.Run("required while cookies are Secure", func(t *testing.T) {
+		t.Setenv("PUBLIC_URL", "")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PUBLIC_URL") {
+			t.Fatalf("got %v, want an error naming PUBLIC_URL", err)
+		}
+	})
+	t.Run("plain-http development defaults to localhost on the port", func(t *testing.T) {
+		t.Setenv("PUBLIC_URL", "")
+		t.Setenv("COOKIE_SECURE", "false")
+		t.Setenv("PORT", "9090")
+		if c, err := Load(); err != nil || c.PublicOrigin != "http://localhost:9090" {
+			t.Fatalf("got %q, %v", c.PublicOrigin, err)
+		}
+	})
+	for raw, want := range map[string]string{
+		"https://budget.example.com":      "https://budget.example.com",
+		" HTTPS://Budget.Example.com/ ":   "https://budget.example.com",
+		"https://budget.example.com:443":  "https://budget.example.com",
+		"https://budget.example.com:8443": "https://budget.example.com:8443",
+	} {
+		t.Run("accepts "+raw, func(t *testing.T) {
+			t.Setenv("PUBLIC_URL", raw)
+			if c, err := Load(); err != nil || c.PublicOrigin != want {
+				t.Fatalf("got %q, %v, want %q", c.PublicOrigin, err, want)
+			}
+		})
+	}
+	for _, raw := range []string{"budget.example.com", "https://budget.example.com/app", "https://u:p@budget.example.com", "https://budget.example.com?x=1", "ftp://budget.example.com", "http://budget.example.com"} {
+		t.Run("refuses "+raw, func(t *testing.T) {
+			t.Setenv("PUBLIC_URL", raw)
+			if _, err := Load(); err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	c, err := Load()
 	if err != nil {

@@ -39,11 +39,13 @@ func fetchEnv(t *testing.T, loginErr error) (*env, *fetch.Fetcher) {
 	f := fetch.New(d, &fnbtest.Login{Srv: bank, Err: loginErr}, led, bud, fetch.Config{
 		Creds: fnb.Credentials{Username: "u", Password: "p"}, Products: []string{"DDA"}, Hour: 6, BankingURL: bank.Base(),
 	})
-	h, err := handler.New(users, led, bud, handler.Config{SessionTTL: time.Hour, Fetcher: f})
+	srv := httptest.NewUnstartedServer(nil) // opened first: the handler needs its origin
+	h, err := handler.New(users, led, bud, handler.Config{SessionTTL: time.Hour, Fetcher: f, PublicOrigin: "http://" + srv.Listener.Addr().String()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h.Server(middleware.RequireUser(users), func(h http.Handler) http.Handler { return h }, nil))
+	srv.Config.Handler = h.Server(middleware.RequireUser(users, h.SessionCookie()), func(h http.Handler) http.Handler { return h }, nil)
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return &env{t: t, srv: srv, users: users, h: h}, f
 }

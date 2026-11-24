@@ -1,41 +1,73 @@
 package handler
 
 import (
+	"bytes"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// The body limit has to act before nosurf parses the form, and must answer a
+// The body limit has to act before the form is parsed, and must answer a
 // declared-oversized body with 413 rather than letting it through to become a
-// confusing CSRF failure.
-func TestLimitBodies(t *testing.T) {
-	reached := false
-	h := limitBodies(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+// confusing CSRF failure. Run through the real policy over the real route
+// patterns: only the import route earns the large allowance, and only for
+// multipart.
+func TestBodyLimits(t *testing.T) {
+	mux := http.NewServeMux()
+	var reached bool
+	for _, p := range []string{importPattern, "POST /members"} {
+		mux.HandleFunc(p, func(http.ResponseWriter, *http.Request) { reached = true })
+	}
+	p, err := newCSRF("https://budget.example", true, func(r *http.Request) string { _, pat := mux.Handler(r); return pat })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := p.Handler(mux)
 
+	multipartBody := func() (io.Reader, string) {
+		var b bytes.Buffer
+		w := multipart.NewWriter(&b)
+		w.WriteField("x", "y")
+		w.Close()
+		return &b, w.FormDataContentType()
+	}
 	cases := []struct {
-		method, path string
-		length       int64
-		want         int
+		name, path, ctype string
+		length            int64
+		want              int // 413 or 403 (the token is checked after the cap, so under the cap it is 403)
 	}{
-		{"POST", "/import", MaxUploadBytes, 200},
-		{"POST", "/import", MaxUploadBytes + 1, http.StatusRequestEntityTooLarge},
-		// Only the import gets the large allowance.
-		{"POST", "/members", maxFormBytes + 1, http.StatusRequestEntityTooLarge},
-		{"POST", "/members", 100, 200},
+		{"import at the cap", "/import", "multipart", MaxUploadBytes, 403},
+		{"import over the cap", "/import", "multipart", MaxUploadBytes + 1, http.StatusRequestEntityTooLarge},
+		{"form over 1 MiB", "/members", "form", maxFormBytes + 1, http.StatusRequestEntityTooLarge},
+		{"form under 1 MiB", "/members", "form", 100, 403},
+		// The import's large allowance is for multipart only.
+		{"import with a form body over 1 MiB", "/import", "form", maxFormBytes + 1, http.StatusRequestEntityTooLarge},
+		// Multipart is refused outside the import route.
+		{"multipart on another route", "/members", "multipart", 100, http.StatusUnsupportedMediaType},
 	}
 	for _, c := range cases {
 		reached = false
-		req := httptest.NewRequest(c.method, c.path, strings.NewReader(""))
-		req.ContentLength = c.length
+		var body io.Reader = strings.NewReader("")
+		ctype := "application/x-www-form-urlencoded"
+		if c.ctype == "multipart" {
+			body, ctype = multipartBody()
+		}
+		req := httptest.NewRequest("POST", "https://budget.example"+c.path, body)
+		req.Header.Set("Content-Type", ctype)
+		req.Header.Set("Origin", "https://budget.example")
+		if c.length > 100 {
+			req.ContentLength = c.length
+		}
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		if rec.Code != c.want {
-			t.Errorf("%s %s length %d: %d, want %d", c.method, c.path, c.length, rec.Code, c.want)
+		if rec.Code != c.want || reached {
+			t.Errorf("%s: %d (reached=%v), want %d", c.name, rec.Code, reached, c.want)
 		}
-		if reached != (c.want == 200) {
-			t.Errorf("%s %s length %d: reached handler = %v", c.method, c.path, c.length, reached)
+		if c.want == http.StatusRequestEntityTooLarge && !strings.Contains(rec.Body.String(), "That upload is too large.") {
+			t.Errorf("%s: body %q", c.name, rec.Body.String())
 		}
 	}
 }

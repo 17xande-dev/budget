@@ -4,12 +4,11 @@ go 1.27.4
 
 require (
 	github.com/17xande-dev/password v0.1.0
-	github.com/17xande-dev/ratelimit v0.1.0
+	github.com/17xande-dev/ratelimit v0.2.0
 	github.com/17xande-dev/sqlitekit v0.2.0
-	github.com/17xande-dev/websec v0.1.0
+	github.com/17xande-dev/websec v0.2.0
 	github.com/chromedp/cdproto v0.160.5
 	github.com/chromedp/chromedp v0.24.0
-	github.com/justinas/nosurf v1.2.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.62.0
@@ -20,6 +19,7 @@ require (
 	github.com/go-json-experiment/json v1.27.2 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/justinas/nosurf v1.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mfridman/interpolate v0.2.0 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect

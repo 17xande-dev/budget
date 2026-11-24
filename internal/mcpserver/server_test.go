@@ -56,7 +56,8 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { d.Close() })
 	f := &fixture{t: t, db: d, users: auth.NewStore(d), ledger: ledger.NewStore(d), budget: budget.NewStore(d)}
-	h, err := handler.New(f.users, f.ledger, f.budget, handler.Config{SessionTTL: time.Hour})
+	f.srv = httptest.NewUnstartedServer(nil) // opened first: the handler needs its origin
+	h, err := handler.New(f.users, f.ledger, f.budget, handler.Config{SessionTTL: time.Hour, PublicOrigin: "http://" + f.srv.Listener.Addr().String()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,8 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	limit := func(h http.Handler) http.Handler { return h }
-	f.srv = httptest.NewServer(h.Server(middleware.RequireUser(f.users), limit, f.mcp.Handler()))
+	f.srv.Config.Handler = h.Server(middleware.RequireUser(f.users, h.SessionCookie()), limit, f.mcp.Handler())
+	f.srv.Start()
 	t.Cleanup(f.srv.Close)
 
 	pw, err := auth.HashPassword(t.Context(), "correct horse battery")
