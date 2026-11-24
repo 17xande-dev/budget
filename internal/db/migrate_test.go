@@ -109,8 +109,9 @@ func TestOldDatabaseIsAdopted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(status) != 2 || status[0].State != "applied" || status[1].State != "pending" {
-		t.Fatalf("status after adoption: %+v, want 0001 applied and 0002 pending", status)
+	// Open adopted at 1 and ran the real 0002; the test's later migration is pending.
+	if len(status) != 3 || status[0].State != "applied" || status[1].State != "applied" || status[2].State != "pending" {
+		t.Fatalf("status after adoption: %+v, want 0001 and 0002 applied and 0003 pending", status)
 	}
 	if err := migrate(context.Background(), d, files); err != nil {
 		t.Fatal(err)
@@ -123,16 +124,25 @@ func TestOldDatabaseIsAdopted(t *testing.T) {
 	}
 }
 
+// withLaterMigration is every real migration plus one more, so a test can have a
+// pending migration and a binary that does not know the newest version.
 func withLaterMigration(t *testing.T) fs.FS {
 	t.Helper()
-	base, err := migrationsFS.ReadFile("migrations/" + baselineFile)
+	files := fstest.MapFS{
+		"0003_later.sql": {Data: []byte("-- +goose Up\nCREATE TABLE later (id INTEGER PRIMARY KEY) STRICT;\n")},
+	}
+	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fstest.MapFS{
-		baselineFile:     {Data: base},
-		"0002_later.sql": {Data: []byte("-- +goose Up\nCREATE TABLE later (id INTEGER PRIMARY KEY) STRICT;\n")},
+	for _, e := range entries {
+		data, err := migrationsFS.ReadFile("migrations/" + e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[e.Name()] = &fstest.MapFile{Data: data}
 	}
+	return files
 }
 
 // Without Adopt, goosestrict refuses the old database: this is the failure the
@@ -157,8 +167,8 @@ func TestFreshDatabaseMigratesFromZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, err := p.GetDBVersion(context.Background())
-	if err != nil || v != 1 {
-		t.Fatalf("version of a fresh database = %d, %v; want 1", v, err)
+	if err != nil || v != 2 {
+		t.Fatalf("version of a fresh database = %d, %v; want 2 (every real migration)", v, err)
 	}
 	if n := count(t, d, "accounts"); n != 0 {
 		t.Errorf("fresh accounts: %d", n)
@@ -166,8 +176,8 @@ func TestFreshDatabaseMigratesFromZero(t *testing.T) {
 	if err := migrate(context.Background(), d, withLaterMigration(t)); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := p.GetDBVersion(context.Background()); v != 2 {
-		t.Errorf("version after a later migration = %d, want 2", v)
+	if v, _ := p.GetDBVersion(context.Background()); v != 3 {
+		t.Errorf("version after a later migration = %d, want 3", v)
 	}
 }
 
@@ -183,7 +193,7 @@ func TestNewerDatabaseRefused(t *testing.T) {
 	}
 	d.Close()
 	if _, err := Open(path); err == nil {
-		t.Fatal("a database at version 2 was opened by a binary that knows version 1")
+		t.Fatal("a database at version 3 was opened by a binary that knows version 2")
 	}
 }
 
@@ -278,8 +288,9 @@ func TestLegacyDatabaseMissingATableIsCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, err := p.GetDBVersion(t.Context()); err != nil || v != 1 {
-		t.Errorf("adopted at %d, %v; want 1", v, err)
+	// Adopted at 1, then the real 0002 ran.
+	if v, err := p.GetDBVersion(t.Context()); err != nil || v != 2 {
+		t.Errorf("adopted and migrated to %d, %v; want 2", v, err)
 	}
 }
 

@@ -101,6 +101,10 @@ func serve(cfg config.Config) error {
 		Hour:     cfg.FNB.Hour,
 		Minute:   cfg.FNB.Minute,
 	})
+	users.Life = auth.Lifetime(cfg.SessionTTL)
+	if err := users.Life.Validate(); err != nil {
+		return fmt.Errorf("session lifetime: %w", err)
+	}
 	h, err := handler.New(users, led, bud, handler.Config{
 		Fetcher:        fetcher,
 		Backups:        backups(cfg),

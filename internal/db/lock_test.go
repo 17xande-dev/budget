@@ -99,13 +99,13 @@ func TestOpenGivesUpWhenTheMigrationLockStaysHeld(t *testing.T) {
 func TestConcurrentOpensOfAFreshDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fresh.db")
 	openConcurrently(t, path, 8)
-	requireEachVersionOnce(t, path, 2) // version 0 and the baseline
+	requireEachVersionOnce(t, path, 3) // version 0, the baseline and 0002
 }
 
 func TestConcurrentOpensOfALegacyDatabase(t *testing.T) {
 	path := oldDatabase(t, nil)
 	openConcurrently(t, path, 8)
-	requireEachVersionOnce(t, path, 2)
+	requireEachVersionOnce(t, path, 3)
 	d, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)

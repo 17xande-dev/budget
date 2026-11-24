@@ -13,7 +13,17 @@ import (
 	"time"
 
 	"github.com/17xande-dev/password"
+	"github.com/17xande-dev/websec/session"
 )
+
+// DefaultIdle is how long a session may go unused before it ends.
+const DefaultIdle = 7 * 24 * time.Hour
+
+// Lifetime is the session policy for a sign-in that lasts ttl (SESSION_TTL, the
+// absolute end): seven days idle, or ttl itself when that is shorter.
+func Lifetime(ttl time.Duration) session.Lifetime {
+	return session.Lifetime{Idle: min(DefaultIdle, ttl), Absolute: ttl}
+}
 
 // User is someone who can sign in. There are no roles: a household budget has
 // two people who both see and do everything.
@@ -31,10 +41,14 @@ type User struct {
 
 type Store struct {
 	db *sql.DB
+	// Life is the session policy: the idle limit and the absolute limit the
+	// conformance suite and VerifySession enforce. main sets it from SESSION_TTL.
+	Life session.Lifetime
 }
 
+// NewStore uses the default 7 day idle / 30 day absolute lifetime.
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+	return &Store{db: db, Life: Lifetime(30 * 24 * time.Hour)}
 }
 
 const userColumns = `id, email, name, must_change_password, created_at, last_login_at`
@@ -253,32 +267,44 @@ func (s *Store) IssueSession(userID int64, now time.Time, ttl time.Duration) (st
 		return "", err
 	}
 	if _, err := s.db.Exec(`
-		INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		hashToken(token), userID, formatTime(now), formatTime(now.Add(ttl))); err != nil {
+		INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)`,
+		hashToken(token), userID, formatTime(now), formatTime(now.Add(ttl)), formatTime(now)); err != nil {
 		return "", fmt.Errorf("insert session: %w", err)
 	}
 	return token, nil
 }
 
 // VerifySession returns the user a session token belongs to. The bool is false if
-// the token is unknown or expired.
+// the token is unknown, past its absolute end (expires_at, fixed at sign-in) or
+// unused for the idle limit. A valid session that has not been seen for a minute
+// has last_seen_at rewritten to now; the write is best-effort and never fails the
+// request.
 func (s *Store) VerifySession(token string, now time.Time) (User, bool, error) {
 	if token == "" {
 		return User{}, false, nil
 	}
-	var expires time.Time
+	var expires, created, lastSeen time.Time
 	u, err := scanUser(s.db.QueryRow(`
-		SELECT u.id, u.email, u.name, u.must_change_password, u.created_at, u.last_login_at, s.expires_at
+		SELECT u.id, u.email, u.name, u.must_change_password, u.created_at, u.last_login_at, s.expires_at, s.created_at, s.last_seen_at
 		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token_hash = ?`, hashToken(token)), timeScan(&expires))
+		WHERE s.token_hash = ?`, hashToken(token)), timeScan(&expires), timeScan(&created), timeScan(&lastSeen))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return User{}, false, nil
 	case err != nil:
 		return User{}, false, fmt.Errorf("verify session: %w", err)
 	}
-	if !now.Before(expires) {
+	if !now.Before(expires) || s.Life.Expired(created, lastSeen, now) {
 		return User{}, false, nil
+	}
+	if session.NeedsTouch(lastSeen, now) {
+		// Guarded so concurrent requests write once, and so a last_seen_at from
+		// the future (the clock stepped back) is rewritten to now rather than
+		// extending the session.
+		if _, err := s.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE token_hash = ? AND (last_seen_at <= ? OR last_seen_at > ?)`,
+			formatTime(now), hashToken(token), formatTime(now.Add(-session.TouchEvery)), formatTime(now)); err != nil {
+			log.Printf("auth: touch session: %v", err)
+		}
 	}
 	return u, true, nil
 }
@@ -291,11 +317,11 @@ func (s *Store) DeleteSession(token string) error {
 	return nil
 }
 
-// DeleteExpiredSessions removes sessions that have run out and returns how many.
-// Expiry is already enforced on read, so this is housekeeping: without it the
-// table grows for ever.
+// DeleteExpiredSessions removes sessions past their absolute end or unused for
+// the idle limit, and returns how many. Expiry is already enforced on read, so
+// this is housekeeping: without it the table grows for ever.
 func (s *Store) DeleteExpiredSessions(now time.Time) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at <= ?`, formatTime(now))
+	res, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?`, formatTime(now), formatTime(now.Add(-s.Life.Idle)))
 	if err != nil {
 		return 0, fmt.Errorf("delete expired sessions: %w", err)
 	}
