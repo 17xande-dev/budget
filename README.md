@@ -54,6 +54,28 @@ shared Cloudflare tunnel) is done by `~/dev/17xande.dev/infra`.
   image locally, pushes it to `ghcr.io/17xande-dev/budget` and swaps it in once
   `/health` passes. It logs in to ghcr.io with `gh auth token` (`.kamal/secrets`).
 - **Roll back:** `kamal rollback <version>` (`kamal app details` lists versions).
+  If migration 0002 has run and the target image only knows 0001, undo 0002
+  before rolling back. The old image refuses the migrated database, and Budget
+  has no migrate-down command.
+
+  Take a fresh backup and stop the app with `kamal app stop`. On `home-docker`,
+  use a SQLite CLI with the `budget_budget-data` volume mounted at `/data`.
+  The Budget image is distroless and has no `sqlite3`; run a separate client
+  as the app user (UID 65532). Run `sqlite3 -bail /data/budget.db` and apply both
+  changes in one transaction:
+
+  ```sql
+  BEGIN IMMEDIATE;
+  ALTER TABLE sessions DROP COLUMN last_seen_at;
+  DELETE FROM goose_db_version WHERE version_id = 2;
+  COMMIT;
+  ```
+
+  Verify `SELECT MAX(version_id) FROM goose_db_version;` returns `1`, then run
+  `kamal rollback <version>` without restarting the newer image (it would
+  reapply 0002). Alternatively, [restore the pre-deploy backup](#backups-and-export)
+  made at version 1, replacing the restore procedure's final `kamal app start`
+  with `kamal rollback <version>`. Restoring loses writes made after that backup.
 - **Logs:** `make logs-prod` (`kamal app logs -f`).
 - **Hostname:** in the shared tunnel in Cloudflare, add a public hostname
   `budget.17xande.dev` with service `http://kamal-proxy:80`.
