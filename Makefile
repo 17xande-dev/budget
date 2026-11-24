@@ -24,6 +24,8 @@ build: bundle
 	CGO_ENABLED=0 go build -trimpath -o bin/budget .
 
 ## test: the full gate -- format, vet, Go tests (uncached, -race, skips counted), Deno check and tests, then vulncheck
+# Two skips are expected without the opt-in browser and real-export fixtures.
+# The session suite's disable case passes with a reason: there are no disabled accounts.
 test: bundle
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	go vet ./...
