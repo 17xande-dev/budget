@@ -58,22 +58,29 @@ shared Cloudflare tunnel) is done by `~/dev/17xande.dev/infra`.
   before rolling back. The old image refuses the migrated database, and Budget
   has no migrate-down command.
 
-  Take a fresh backup and stop the app with `kamal app stop`. On `home-docker`,
-  use a SQLite CLI with the `budget_budget-data` volume mounted at `/data`.
-  The Budget image is distroless and has no `sqlite3`; run a separate client
-  as the app user (UID 65532). Run `sqlite3 -bail /data/budget.db` and apply both
-  changes in one transaction:
+  Take a fresh backup and stop the app with `kamal app stop` (let it finish, so
+  no commits sit only in the `-wal` file). The Budget image is distroless and
+  has no `sqlite3`, so on `home-docker` a throwaway Alpine container mounts the
+  `budget_budget-data` volume at `/data`, installs the client (needs `DROP
+  COLUMN`, SQLite 3.35 or newer) and runs it as the app user, UID 65532. Running
+  it as root would leave root-owned `-journal`/`-wal` files and
+  `budget.db.migrate-lock` that stop the app starting. The SQL goes in on
+  stdin, as one transaction, and the last line prints the version, which must
+  be `1`:
 
-  ```sql
+  ```sh
+  docker run --rm -i -v budget_budget-data:/data alpine:3 sh -c 'set -e; apk add -q --no-cache sqlite; adduser -D -H -u 65532 app; exec su -s /bin/sh app -c "sqlite3 -bail /data/budget.db"' <<'SQL'
   BEGIN IMMEDIATE;
   ALTER TABLE sessions DROP COLUMN last_seen_at;
   DELETE FROM goose_db_version WHERE version_id = 2;
   COMMIT;
+  SELECT MAX(version_id) FROM goose_db_version;
+  SQL
   ```
 
-  Verify `SELECT MAX(version_id) FROM goose_db_version;` returns `1`, then run
-  `kamal rollback <version>` without restarting the newer image (it would
-  reapply 0002). Alternatively, [restore the pre-deploy backup](#backups-and-export)
+  Then run `kamal rollback <version>` without restarting the newer image (it
+  would reapply 0002). The rollback signs everyone out again (the old image
+  reads the old cookie names). Alternatively, [restore the pre-deploy backup](#backups-and-export)
   made at version 1, replacing the restore procedure's final `kamal app start`
   with `kamal rollback <version>`. Restoring loses writes made after that backup.
 - **Logs:** `make logs-prod` (`kamal app logs -f`).
