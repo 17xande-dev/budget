@@ -370,6 +370,15 @@ func TestOpenRedirectRefused(t *testing.T) {
 			t.Errorf("next=%q redirected to %q, want %q", next, r.loc, want)
 		}
 	}
+	// The shared hostile corpus: every spelling falls back to the home page, on
+	// the raw Location.
+	for _, next := range webtest.HostileRedirects() {
+		b := e.browser()
+		r := b.post("/login", "/login", url.Values{"email": {"owner@example.com"}, "password": {ownerPassword}, "next": {next}})
+		if r.code != http.StatusSeeOther || r.loc != "/" {
+			t.Errorf("hostile next=%q: %d -> %q, want 303 -> /", next, r.code, r.loc)
+		}
+	}
 }
 
 func TestCSRFRequired(t *testing.T) {
