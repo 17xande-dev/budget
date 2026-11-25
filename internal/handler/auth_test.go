@@ -16,6 +16,7 @@ import (
 	"github.com/17xande-dev/budget/internal/handler"
 	"github.com/17xande-dev/password"
 	"github.com/17xande-dev/ratelimit/clientip"
+	"github.com/17xande-dev/websec/webtest"
 )
 
 const rehashEmail = "legacy@example.com"
@@ -141,17 +142,10 @@ func TestFailedLoginLogsOnlyAccountIDAndClientIP(t *testing.T) {
 	attempt := func(address string) resp {
 		t.Helper()
 		form := url.Values{"email": {address}, "password": {"wrong password"}, "csrf_token": {token}}
-		req, err := http.NewRequest(http.MethodPost, e.srv.URL+"/login", strings.NewReader(form.Encode()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Origin", e.srv.URL)
-		req.Header.Set("CF-Connecting-IP", ip)
 		// The response's CSRF mask changes on each request. Hold it fixed
 		// so only account existence could change the bytes of the response.
 		cryptotest.SetGlobalRandom(t, 1)
-		r := b.do(req)
+		r := wrap(b.c.PostForm("/login", form, webtest.Header("CF-Connecting-IP", ip)))
 		if r.code != http.StatusUnauthorized {
 			t.Fatalf("failed login returned %d, want 401", r.code)
 		}
@@ -178,11 +172,10 @@ func TestFailedLoginLogsOnlyAccountIDAndClientIP(t *testing.T) {
 	}
 	logged := string(data)
 	sum := sha256.Sum256([]byte(secret))
-	for _, forbidden := range []string{secret, fmt.Sprintf("%x", sum), base64.RawURLEncoding.EncodeToString(sum[:]), email} {
-		if strings.Contains(logged, forbidden) {
-			t.Error("failed login log contains the submitted value or its hash")
-		}
-	}
+	// The marker is the log line the refusal path writes, so an empty log cannot pass.
+	// NoSecrets also looks for each value's encoded forms (query, JSON, base64, hex).
+	webtest.NoSecrets(t, logged, "unknown account client_ip="+ip,
+		secret, fmt.Sprintf("%x", sum), base64.RawURLEncoding.EncodeToString(sum[:]), email)
 	if n := strings.Count(logged, "unknown account client_ip="+ip); n != 2 {
 		t.Errorf("got %d unknown-account entries with the resolved IP, want 2", n)
 	}
@@ -205,8 +198,9 @@ func TestAuthCookieAttributes(t *testing.T) {
 			}
 			// The kit names the CSRF cookie __Host-csrf_token on https.
 			csrfName := map[bool]string{true: "__Host-csrf_token", false: "csrf_token"}[secure]
-			csrf := requireCookie(t, "GET /login", loginPage, csrfName)
-			assertAuthCookieAttributes(t, "GET /login", csrf, secure)
+			csrf := webtest.WantCookie(t, loginPage.res, webtest.CookieWant{
+				Name: csrfName, Path: "/", Secure: secure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			})
 			if csrf.Value == "" {
 				t.Error("GET /login: CSRF cookie is empty")
 			}
@@ -217,8 +211,9 @@ func TestAuthCookieAttributes(t *testing.T) {
 				t.Fatalf("POST /login: got %d -> %q, want 303 -> /", login.code, login.loc)
 			}
 			sessionName := map[bool]string{true: "__Host-budget_session", false: "budget_session"}[secure]
-			session := requireCookie(t, "POST /login", login, sessionName)
-			assertAuthCookieAttributes(t, "POST /login", session, secure)
+			session := webtest.WantCookie(t, login.res, webtest.CookieWant{
+				Name: sessionName, Path: "/", Secure: secure, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			})
 			latestExpiry := time.Now().Add(ttl)
 			// The kit floors Max-Age to whole seconds, so it may read a second short.
 			if session.Value == "" || session.MaxAge > int(ttl.Seconds()) || session.MaxAge < int(ttl.Seconds())-2 ||
@@ -231,39 +226,14 @@ func TestAuthCookieAttributes(t *testing.T) {
 			if logout.code != http.StatusSeeOther || logout.loc != "/login" {
 				t.Fatalf("POST /logout: got %d -> %q, want 303 -> /login", logout.code, logout.loc)
 			}
-			cleared := requireCookie(t, "POST /logout", logout, sessionName)
-			assertAuthCookieAttributes(t, "POST /logout", cleared, secure)
+			cleared := webtest.WantCookie(t, logout.res, webtest.CookieWant{
+				Name: sessionName, Path: "/", Secure: secure, HttpOnly: true, SameSite: http.SameSiteLaxMode, Cleared: true,
+			})
 			// The kit also sets Expires to the epoch, for clients that ignore Max-Age.
 			if cleared.Value != "" || cleared.MaxAge >= 0 || cleared.Expires.Unix() != 0 {
 				t.Errorf("POST /logout: empty=%t MaxAge=%d Expires=%s, want an empty cookie with negative MaxAge and an epoch Expires",
 					cleared.Value == "", cleared.MaxAge, cleared.Expires)
 			}
 		})
-	}
-}
-
-func requireCookie(t *testing.T, route string, r resp, name string) *http.Cookie {
-	t.Helper()
-	var found *http.Cookie
-	for _, c := range (&http.Response{Header: r.hdr}).Cookies() {
-		if c.Name != name {
-			continue
-		}
-		if found != nil {
-			t.Fatalf("%s: sent more than one %q cookie", route, name)
-		}
-		found = c
-	}
-	if found == nil {
-		t.Fatalf("%s: did not send %q cookie", route, name)
-	}
-	return found
-}
-
-func assertAuthCookieAttributes(t *testing.T, route string, c *http.Cookie, secure bool) {
-	t.Helper()
-	if c.Path != "/" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Secure != secure {
-		t.Errorf("%s %s: Path=%q HttpOnly=%t SameSite=%v Secure=%t, want Path=/ HttpOnly SameSite=Lax Secure=%t",
-			route, c.Name, c.Path, c.HttpOnly, c.SameSite, c.Secure, secure)
 	}
 }

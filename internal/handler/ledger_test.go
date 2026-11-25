@@ -44,9 +44,8 @@ func (b *browser) upload(files map[string][]byte) resp {
 		fw.Write(data)
 	}
 	mw.Close()
-	req, _ := http.NewRequest("POST", b.e.srv.URL+"/import", &body)
+	req := b.c.NewRequest("POST", "/import", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Origin", b.e.srv.URL)
 	return b.do(req)
 }
 

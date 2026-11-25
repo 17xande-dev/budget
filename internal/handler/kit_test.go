@@ -17,13 +17,8 @@ const (
 
 func (b *browser) cookie(name string) string {
 	b.e.t.Helper()
-	u, _ := url.Parse(b.e.srv.URL)
-	for _, c := range b.c.Jar.Cookies(u) {
-		if c.Name == name {
-			return c.Value
-		}
-	}
-	return ""
+	v, _ := b.c.Cookie(name)
+	return v
 }
 
 func (b *browser) refusedWith(path, token string) {
@@ -102,9 +97,10 @@ func TestBareNamedSessionCookieIsIgnored(t *testing.T) {
 		t.Fatal("no __Host- session cookie after sign-in")
 	}
 	get := func(name string) resp {
-		req, _ := http.NewRequest("GET", e.srv.URL+"/settings", nil)
+		fresh := e.browser() // a fresh jar: only the cookie below is sent
+		req := fresh.c.NewRequest("GET", "/settings", nil)
 		req.AddCookie(&http.Cookie{Name: name, Value: valid})
-		return e.browser().do(req) // a fresh jar: only the cookie above is sent
+		return fresh.do(req)
 	}
 	if r := get("budget_session"); r.code != http.StatusSeeOther || !strings.HasPrefix(r.loc, "/login") {
 		t.Fatalf("a bare-named session cookie signed someone in: %d -> %q", r.code, r.loc)

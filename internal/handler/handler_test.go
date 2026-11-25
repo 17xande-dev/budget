@@ -2,11 +2,8 @@ package handler_test
 
 import (
 	"database/sql"
-	"html"
-	"io"
 	"io/fs"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -24,6 +21,7 @@ import (
 	"github.com/17xande-dev/budget/internal/ledger"
 	"github.com/17xande-dev/budget/internal/middleware"
 	"github.com/17xande-dev/password"
+	"github.com/17xande-dev/websec/webtest"
 )
 
 const setupToken = "test-setup-token-that-is-long-enough"
@@ -83,20 +81,17 @@ func newEnvWith(t *testing.T, cfg handler.Config) *env {
 	return &env{t: t, srv: srv, users: users, h: h, db: d}
 }
 
-// browser is a client with its own cookie jar that does not follow redirects, so
-// tests assert on where a response sends you.
+// browser is a webtest client over the env's server: a cookie jar, the browser's
+// Origin on unsafe requests, and no redirect following, so tests assert on where
+// a response sends you. Redirect Locations are read raw (Go's own client cannot
+// see a Location such as "/\t/evil.example").
 type browser struct {
 	e *env
-	c *http.Client
+	c *webtest.Client
 }
 
 func (e *env) browser() *browser {
-	jar, _ := cookiejar.New(nil)
-	return &browser{e: e, c: &http.Client{
-		Transport:     e.srv.Client().Transport,
-		Jar:           jar,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
+	return &browser{e: e, c: webtest.NewServer(e.t, e.srv)}
 }
 
 type resp struct {
@@ -104,39 +99,28 @@ type resp struct {
 	loc  string
 	body string
 	hdr  http.Header
+	res  *webtest.Response
+}
+
+func wrap(r *webtest.Response) resp {
+	return resp{code: r.Status, loc: r.Location(), body: r.Body, hdr: r.Header, res: r}
 }
 
 func (b *browser) do(req *http.Request) resp {
 	b.e.t.Helper()
-	res, err := b.c.Do(req)
-	if err != nil {
-		b.e.t.Fatal(err)
-	}
-	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
-	return resp{code: res.StatusCode, loc: res.Header.Get("Location"), body: string(body), hdr: res.Header}
+	return wrap(b.c.Do(req))
 }
 
 func (b *browser) get(path string) resp {
 	b.e.t.Helper()
-	req, _ := http.NewRequest("GET", b.e.srv.URL+path, nil)
-	return b.do(req)
+	return wrap(b.c.Get(path))
 }
-
-var csrfRe = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
 
 // token fetches a page and returns its CSRF token, as a browser would have one
 // from the form it is about to submit.
 func (b *browser) token(path string) string {
 	b.e.t.Helper()
-	r := b.get(path)
-	m := csrfRe.FindStringSubmatch(r.body)
-	if m == nil {
-		b.e.t.Fatalf("no CSRF token on %s (status %d)", path, r.code)
-	}
-	// Unescaped as a browser would: the token is base64, and html/template
-	// writes a "+" in an attribute as "&#43;".
-	return html.UnescapeString(m[1])
+	return b.c.Page(path).Token()
 }
 
 // post submits a form from page `from`, carrying its CSRF token and the Origin a
@@ -152,10 +136,7 @@ func (b *browser) post(from, path string, form url.Values) resp {
 
 func (b *browser) postRaw(path string, form url.Values) resp {
 	b.e.t.Helper()
-	req, _ := http.NewRequest("POST", b.e.srv.URL+path, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", b.e.srv.URL)
-	return b.do(req)
+	return wrap(b.c.PostForm(path, form))
 }
 
 const ownerPassword = "owner passphrase one"
@@ -164,10 +145,10 @@ const ownerPassword = "owner passphrase one"
 func (e *env) claim() *browser {
 	e.t.Helper()
 	b := e.browser()
-	r := b.post("/setup", "/setup", url.Values{
+	r := wrap(b.c.SignIn("/setup", url.Values{
 		"token": {" " + setupToken + "\n"}, "email": {"Owner <owner@example.com>"}, "name": {"Owner"},
 		"password": {ownerPassword}, "password_confirm": {ownerPassword},
-	})
+	}))
 	if r.code != http.StatusSeeOther || r.loc != "/" {
 		e.t.Fatalf("setup claim: %d -> %q\n%s", r.code, r.loc, r.body)
 	}
@@ -411,26 +392,22 @@ func TestEveryProtectedRouteRefusesAnonymous(t *testing.T) {
 	e := newEnv(t)
 	e.claim()
 	anon := e.browser()
-	routes := e.h.Routes()
-	if len(routes) < 5 {
-		t.Fatalf("only %d protected routes recorded; is Register still recording them?", len(routes))
+	var patterns []string
+	for _, rt := range e.h.Routes() {
+		patterns = append(patterns, rt.Method+" "+rt.Pattern)
 	}
-	for _, rt := range routes {
-		var r resp
-		if rt.Method == "POST" {
-			r = anon.post("/login", rt.TestPath(), nil)
-		} else {
-			r = anon.get(rt.TestPath())
-		}
-		if r.code != http.StatusSeeOther || !strings.HasPrefix(r.loc, "/login?next=") {
-			t.Errorf("%s %s answered an anonymous request with %d %q", rt.Method, rt.Pattern, r.code, r.loc)
-		}
-	}
+	// Every wildcard in the route table is {id}; a new wildcard name fails Routes.
+	swept := webtest.Sweep{
+		Routes:    webtest.Routes(t, patterns, map[string]string{"id": "x"}),
+		Min:       30,
+		Client:    func() *webtest.Client { return e.browser().c },
+		TokenPage: "/login",
+		Refused:   webtest.RedirectsTo("/login?next="),
+	}.Run(t)
+	t.Logf("swept %d protected routes", swept)
 
 	// htmx gets a 401 and a reload instruction, not a login page swapped into a fragment.
-	req, _ := http.NewRequest("GET", e.srv.URL+"/members", nil)
-	req.Header.Set("HX-Request", "true")
-	if r := anon.do(req); r.code != http.StatusUnauthorized || r.hdr.Get("HX-Refresh") != "true" {
+	if r := wrap(anon.c.Get("/members", webtest.HTMX())); r.code != http.StatusUnauthorized || r.hdr.Get("HX-Refresh") != "true" {
 		t.Errorf("anonymous htmx request: %d HX-Refresh=%q", r.code, r.hdr.Get("HX-Refresh"))
 	}
 }

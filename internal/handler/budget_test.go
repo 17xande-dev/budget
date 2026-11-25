@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/17xande-dev/websec/webtest"
 )
 
 // seeded is a signed-in owner with the starter categories and the cheque fixture
@@ -62,11 +64,7 @@ func TestCategoriseWithoutJavaScript(t *testing.T) {
 func (b *browser) htmxPost(from, path string, form url.Values) resp {
 	b.e.t.Helper()
 	form.Set("csrf_token", b.token(from))
-	req, _ := http.NewRequest("POST", b.e.srv.URL+path, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", b.e.srv.URL)
-	req.Header.Set("HX-Request", "true")
-	return b.do(req)
+	return wrap(b.c.PostForm(path, form, webtest.HTMX()))
 }
 
 func TestCategoriseWithHTMX(t *testing.T) {
