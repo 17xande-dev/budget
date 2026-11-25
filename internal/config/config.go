@@ -5,12 +5,14 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/17xande-dev/ratelimit/clientip"
@@ -189,11 +191,11 @@ func loadFNB(f *FNB) error {
 		return fmt.Errorf("config: FNB_PASSWORD is not read -- put the password in a file (a docker secret) and set FNB_PASSWORD_FILE to its path")
 	}
 	if path := os.Getenv("FNB_PASSWORD_FILE"); path != "" {
-		b, err := os.ReadFile(path)
+		pw, err := readSecretFile(path)
 		if err != nil {
 			return fmt.Errorf("config: FNB_PASSWORD_FILE: %w", err)
 		}
-		f.Password = strings.TrimRight(string(b), "\r\n")
+		f.Password = pw
 	}
 	if (f.Username == "") != (f.Password == "") {
 		// Half-configured is the case to catch at startup, not at 06:00.
@@ -206,6 +208,45 @@ func loadFNB(f *FNB) error {
 	}
 	f.Hour, f.Minute = t.Hour(), t.Minute()
 	return nil
+}
+
+// maxSecretFile bounds a secret file: a real secret is tiny.
+const maxSecretFile = 64 << 10
+
+// readSecretFile returns the file's contents with exactly one trailing newline
+// (LF or CR LF) removed and nothing else trimmed. Errors are fixed messages: an
+// *os.PathError would carry the path, and operators sometimes paste the secret
+// itself into the path variable.
+func readSecretFile(path string) (string, error) {
+	// O_NONBLOCK so a FIFO with no writer cannot hang startup; the type check on
+	// the opened descriptor (not the name) then refuses it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", errors.New("cannot open the file")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", errors.New("cannot read the file")
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("not a regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxSecretFile+1))
+	if err != nil {
+		return "", errors.New("cannot read the file")
+	}
+	if len(raw) > maxSecretFile {
+		return "", errors.New("file is larger than 64 KiB")
+	}
+	v := strings.TrimSuffix(string(raw), "\n")
+	if len(v) != len(raw) {
+		v = strings.TrimSuffix(v, "\r")
+	}
+	if v == "" {
+		return "", errors.New("file is empty")
+	}
+	return v, nil
 }
 
 func duration(key string, def time.Duration) (time.Duration, error) {

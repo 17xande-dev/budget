@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -189,6 +192,78 @@ func TestBackup(t *testing.T) {
 		t.Setenv("BACKUP_KEEP", bad)
 		if _, err := Load(); err == nil {
 			t.Errorf("BACKUP_KEEP=%s was accepted", bad)
+		}
+	}
+}
+
+// FNB_PASSWORD_FILE follows the shared secret-file rules: one trailing newline
+// stripped, nothing else; empty, oversized and non-regular files refused; and no
+// error ever carries the path (operators paste secrets into path variables).
+func TestFNBPasswordFile(t *testing.T) {
+	root := t.TempDir()
+	write := func(name string, content []byte) string {
+		p := filepath.Join(root, name)
+		if err := os.WriteFile(p, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	load := func(path string) (Config, error) {
+		t.Setenv("FNB_USERNAME", "someone")
+		t.Setenv("FNB_PASSWORD_FILE", path)
+		return Load()
+	}
+	for _, tc := range []struct{ name, content, want string }{
+		{"lf", "pw\n", "pw"},
+		{"crlf", "pw\r\n", "pw"},
+		{"one newline only", "pw\n\n", "pw\n"},
+		{"spaces kept", " pw \n", " pw "},
+	} {
+		c, err := load(write("ok-"+tc.name, []byte(tc.content)))
+		if err != nil || c.FNB.Password != tc.want {
+			t.Errorf("%s: %q, %v", tc.name, c.FNB.Password, err)
+		}
+	}
+
+	fifo := filepath.Join(root, "fifo-secret")
+	fifoErr := syscall.Mkfifo(fifo, 0o600)
+	cases := []struct{ name, path string }{
+		{"missing", filepath.Join(root, "absent-secret")},
+		{"empty", write("empty-secret", nil)},
+		{"newline only", write("newline-secret", []byte("\r\n"))},
+		{"70 KiB", write("big-secret", bytes.Repeat([]byte("a"), 70<<10))},
+		{"directory", root},
+	}
+	if fifoErr == nil {
+		cases = append(cases, struct{ name, path string }{"fifo", fifo})
+	}
+	for _, tc := range cases {
+		// A username-less deployment must refuse too: an empty file used to
+		// leave the fetch silently off.
+		for _, user := range []string{"someone", ""} {
+			t.Setenv("FNB_USERNAME", user)
+			t.Setenv("FNB_PASSWORD_FILE", tc.path)
+			_, err := Load()
+			if err == nil {
+				t.Errorf("%s (user %q): accepted", tc.name, user)
+				continue
+			}
+			if !strings.Contains(err.Error(), "FNB_PASSWORD_FILE") || strings.Contains(err.Error(), tc.path) || strings.Contains(err.Error(), filepath.Base(tc.path)) {
+				t.Errorf("%s: error must name the key and not the path: %v", tc.name, err)
+			}
+		}
+	}
+
+	// A FIFO with a writer reads fine unless its type is checked.
+	if fifoErr == nil {
+		go func() {
+			if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+				w.WriteString("looks-valid\n")
+				w.Close()
+			}
+		}()
+		if _, err := load(fifo); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("fifo with a writer: %v", err)
 		}
 	}
 }
