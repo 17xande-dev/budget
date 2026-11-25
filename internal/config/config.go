@@ -213,10 +213,10 @@ func loadFNB(f *FNB) error {
 // maxSecretFile bounds a secret file: a real secret is tiny.
 const maxSecretFile = 64 << 10
 
-// readSecretFile returns the file's contents with exactly one trailing newline
-// (LF or CR LF) removed and nothing else trimmed. Errors are fixed messages: an
-// *os.PathError would carry the path, and operators sometimes paste the secret
-// itself into the path variable.
+// readSecretFile strips all trailing CR and LF bytes so extra line endings
+// aren't part of the password, while spaces and other bytes are preserved.
+// Errors are fixed messages: an *os.PathError would carry the path, and
+// operators sometimes paste the password into the path variable.
 func readSecretFile(path string) (string, error) {
 	// O_NONBLOCK so a FIFO with no writer cannot hang startup; the type check on
 	// the opened descriptor (not the name) then refuses it.
@@ -239,10 +239,7 @@ func readSecretFile(path string) (string, error) {
 	if len(raw) > maxSecretFile {
 		return "", errors.New("file is larger than 64 KiB")
 	}
-	v := strings.TrimSuffix(string(raw), "\n")
-	if len(v) != len(raw) {
-		v = strings.TrimSuffix(v, "\r")
-	}
+	v := strings.TrimRight(string(raw), "\r\n")
 	if v == "" {
 		return "", errors.New("file is empty")
 	}

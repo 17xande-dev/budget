@@ -196,10 +196,9 @@ func TestBackup(t *testing.T) {
 	}
 }
 
-// FNB_PASSWORD_FILE follows the shared secret-file rules: one trailing newline
-// stripped, nothing else; empty, oversized and non-regular files refused; and no
-// error ever carries the path (operators paste secrets into path variables).
-func TestFNBPasswordFile(t *testing.T) {
+// Preserve password bytes other than trailing CR/LF and don't echo bad paths:
+// operators sometimes paste the password itself into the path variable.
+func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 	root := t.TempDir()
 	write := func(name string, content []byte) string {
 		p := filepath.Join(root, name)
@@ -216,13 +215,24 @@ func TestFNBPasswordFile(t *testing.T) {
 	for _, tc := range []struct{ name, content, want string }{
 		{"lf", "pw\n", "pw"},
 		{"crlf", "pw\r\n", "pw"},
-		{"one newline only", "pw\n\n", "pw\n"},
-		{"spaces kept", " pw \n", " pw "},
+		{"double_lf", "pw\n\n", "pw"},
+		{"double_crlf", "pw\r\n\r\n", "pw"},
+		{"lf_then_cr", "pw\n\r", "pw"},
+		{"lone_cr", "pw\r", "pw"},
+		{"trailing_spaces_kept", "pw  \r\n", "pw  "},
+		{"other_whitespace_kept", " pw \t\n", " pw \t"},
+		{"leading_newline_kept", "\npw\n", "\npw"},
+		{"inner_newline_kept", "p\nw\n", "p\nw"},
 	} {
-		c, err := load(write("ok-"+tc.name, []byte(tc.content)))
-		if err != nil || c.FNB.Password != tc.want {
-			t.Errorf("%s: %q, %v", tc.name, c.FNB.Password, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := load(write("ok-"+tc.name, []byte(tc.content)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.FNB.Password != tc.want {
+				t.Error("FNB password did not match the expected bytes")
+			}
+		})
 	}
 
 	fifo := filepath.Join(root, "fifo-secret")
@@ -231,6 +241,7 @@ func TestFNBPasswordFile(t *testing.T) {
 		{"missing", filepath.Join(root, "absent-secret")},
 		{"empty", write("empty-secret", nil)},
 		{"newline only", write("newline-secret", []byte("\r\n"))},
+		{"repeated newlines only", write("repeated-newlines-secret", []byte("\r\n\r\n"))},
 		{"70 KiB", write("big-secret", bytes.Repeat([]byte("a"), 70<<10))},
 		{"directory", root},
 	}

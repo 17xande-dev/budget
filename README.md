@@ -109,7 +109,10 @@ mkdir -p secrets && chmod 700 secrets
 read -rs P && printf '%s\n' "$P" > secrets/fnb_password && chmod 600 secrets/fnb_password
 ```
 
-then in `.env` set `FNB_USERNAME`, and `FNB_PROFILE` if your login shows a "Linked
+At startup, Budget strips all trailing CR and LF characters from the password
+file, keeps all other bytes (including spaces), and rejects an empty result.
+
+Then in `.env` set `FNB_USERNAME`, and `FNB_PROFILE` if your login shows a "Linked
 Profiles" page (the exact name of the personal profile). `docker compose up -d`
 starts the app and a headless Chrome beside it. **Settings → Bank fetch** shows the
 next run and every attempt; **Fetch now** runs one immediately (at most every 10
