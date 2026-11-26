@@ -91,6 +91,10 @@ func load(lookup env.Lookup) (Config, error) {
 			return "", false
 		}
 		value, ok := lookup(key)
+		// Only the legacy variable is trimmed, as it always was. The file form is
+		// read inside the env module, which strips trailing CR/LF and nothing else,
+		// and that rule is kept deliberately so every app using the module agrees on
+		// what a secret file contains: a space in a file is part of the token.
 		if key == "SETUP_TOKEN" {
 			value = strings.TrimSpace(value)
 		}

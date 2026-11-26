@@ -127,6 +127,8 @@ func TestSetupTokenFile(t *testing.T) {
 		{"accepted", long, long},
 		{"trailing LF stripped", long + "\n", long},
 		{"trailing CRLF stripped", long + "\r\n", long},
+		// Not trimmed, unlike the variable: only trailing CR/LF go, per the env module.
+		{"outer spaces are part of the token", "  " + long[2:] + "  \n", "  " + long[2:] + "  "},
 		{"short is discarded", "short\n", ""},
 		{"one under the minimum is discarded", long[1:] + "\n", ""},
 	} {
@@ -141,6 +143,20 @@ func TestSetupTokenFile(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("the same text in the variable is trimmed", func(t *testing.T) {
+		padded := "  " + long[2:] + "  "
+		t.Setenv("SETUP_TOKEN", padded)
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Trimmed it is 30 characters, under the minimum, so it is discarded;
+		// the file form above keeps the same text and is accepted.
+		if c.SetupToken.IsSet() {
+			t.Errorf("the variable was not trimmed before the length check")
+		}
+	})
 
 	t.Run("both forms are refused without echoing either", func(t *testing.T) {
 		path := write(t, long)
