@@ -106,6 +106,58 @@ func TestShortSetupTokenIgnored(t *testing.T) {
 	}
 }
 
+// SETUP_TOKEN_FILE is the file form the env module offers for every secret.
+// The 32-character minimum is applied to the value read, so it holds for the
+// file form exactly as for the variable.
+func TestSetupTokenFile(t *testing.T) {
+	long := strings.Repeat("f", MinSetupTokenLength)
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "setup_token")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	for _, tc := range []struct {
+		name, content string
+		want          string // "" means discarded
+	}{
+		{"accepted", long, long},
+		{"trailing LF stripped", long + "\n", long},
+		{"trailing CRLF stripped", long + "\r\n", long},
+		{"short is discarded", "short\n", ""},
+		{"one under the minimum is discarded", long[1:] + "\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SETUP_TOKEN_FILE", write(t, tc.content))
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.SetupToken.Reveal(); got != tc.want || c.SetupToken.IsSet() != (tc.want != "") {
+				t.Errorf("SetupToken set=%v, want %q kept", c.SetupToken.IsSet(), tc.want)
+			}
+		})
+	}
+
+	t.Run("both forms are refused without echoing either", func(t *testing.T) {
+		path := write(t, long)
+		t.Setenv("SETUP_TOKEN", "variable-"+long)
+		t.Setenv("SETUP_TOKEN_FILE", path)
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "SETUP_TOKEN_FILE") {
+			t.Fatalf("both forms accepted, or the key not named: %v", err)
+		}
+		for _, secret := range []string{"variable-", long, path, filepath.Base(path)} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("the refusal echoes %q", secret)
+			}
+		}
+	})
+}
+
 func TestClientIPSource(t *testing.T) {
 	// A request from a fixed peer carrying a spoofable CF-Connecting-IP: the key
 	// the configured source reads from it tells the sources apart.
