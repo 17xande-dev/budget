@@ -197,6 +197,27 @@ func TestFNB(t *testing.T) {
 	}
 }
 
+// The loader hides FNB_PASSWORD from the generic secret reader as well as
+// refusing it. Without the wrapper, a plain password beside a password file
+// would add a second, misleading "cannot be set together" complaint to the
+// refusal, and the plain variable would look like a recognised setting.
+func TestPlainPasswordIsHiddenFromSecretReader(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "fnb_password")
+	if err := os.WriteFile(secret, []byte("not-really\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FNB_USERNAME", "someone")
+	t.Setenv("FNB_PASSWORD_FILE", secret)
+	t.Setenv("FNB_PASSWORD", "plain")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "FNB_PASSWORD: is not read") {
+		t.Fatalf("plain password beside a file was not refused: %v", err)
+	}
+	if strings.Contains(err.Error(), "cannot be set together") {
+		t.Errorf("the plain variable reached the secret reader: %v", err)
+	}
+}
+
 func TestBackup(t *testing.T) {
 	t.Setenv("DB_PATH", "/data/budget.db")
 	c, err := Load()
