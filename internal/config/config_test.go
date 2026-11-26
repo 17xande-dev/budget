@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -145,9 +146,15 @@ func TestClientIPSource(t *testing.T) {
 // The old setting is refused, not ignored: dropping it quietly would leave a
 // deployment believing it still had per-client limits.
 func TestTrustedProxiesIsRefused(t *testing.T) {
-	t.Setenv("TRUSTED_PROXIES", "172.16.0.0/12")
-	if _, err := Load(); err == nil {
-		t.Error("TRUSTED_PROXIES was accepted")
+	// Present-but-empty counts as set: an empty export of the old name still
+	// means the deployment has not read the replacement notice.
+	for _, value := range []string{"172.16.0.0/12", ""} {
+		t.Run(fmt.Sprintf("value %q", value), func(t *testing.T) {
+			t.Setenv("TRUSTED_PROXIES", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXIES:") {
+				t.Errorf("TRUSTED_PROXIES=%q was accepted: %v", value, err)
+			}
+		})
 	}
 }
 
