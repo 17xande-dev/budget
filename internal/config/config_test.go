@@ -207,8 +207,8 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 		}
 		return p
 	}
-	load := func(path string) (Config, error) {
-		t.Setenv("FNB_USERNAME", "someone")
+	load := func(t *testing.T, user, path string) (Config, error) {
+		t.Setenv("FNB_USERNAME", user)
 		t.Setenv("FNB_PASSWORD_FILE", path)
 		return Load()
 	}
@@ -225,7 +225,7 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 		{"inner_newline_kept", "p\nw\n", "p\nw"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := load(write("ok-"+tc.name, []byte(tc.content)))
+			c, err := load(t, "someone", write("ok-"+tc.name, []byte(tc.content)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -235,6 +235,24 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 		})
 	}
 
+	loadFIFO := func(user string, path string) error {
+		t.Helper()
+		// A blocking open or read should fail this test, not hang the package.
+		t.Setenv("FNB_USERNAME", user)
+		t.Setenv("FNB_PASSWORD_FILE", path)
+		done := make(chan error, 1)
+		go func() {
+			_, err := Load()
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Load blocked on the FNB password FIFO for 5 seconds (user %q)", user)
+			return nil
+		}
+	}
 	fifo := filepath.Join(root, "fifo-secret")
 	fifoErr := syscall.Mkfifo(fifo, 0o600)
 	cases := []struct{ name, path string }{
@@ -252,9 +270,12 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 		// A username-less deployment must refuse too: an empty file used to
 		// leave the fetch silently off.
 		for _, user := range []string{"someone", ""} {
-			t.Setenv("FNB_USERNAME", user)
-			t.Setenv("FNB_PASSWORD_FILE", tc.path)
-			_, err := Load()
+			var err error
+			if tc.path == fifo {
+				err = loadFIFO(user, tc.path)
+			} else {
+				_, err = load(t, user, tc.path)
+			}
 			if err == nil {
 				t.Errorf("%s (user %q): accepted", tc.name, user)
 				continue
@@ -273,8 +294,42 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 				w.Close()
 			}
 		}()
-		if _, err := load(fifo); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		if err := loadFIFO("someone", fifo); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 			t.Errorf("fifo with a writer: %v", err)
 		}
+	}
+}
+
+func TestFNBPasswordFileSizeLimit(t *testing.T) {
+	t.Setenv("FNB_USERNAME", "someone")
+	for _, tc := range []struct {
+		name string
+		size int
+		want string
+	}{
+		{name: "exactly 64 KiB", size: 64 << 10},
+		{name: "64 KiB plus one", size: 64<<10 + 1, want: "config: FNB_PASSWORD_FILE: file is larger than 64 KiB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "secret")
+			password := strings.Repeat("a", tc.size)
+			if err := os.WriteFile(path, []byte(password), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("FNB_PASSWORD_FILE", path)
+			c, err := Load()
+			if tc.want != "" {
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("want an error rejecting the oversized file, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.FNB.Password != password {
+				t.Error("password bytes changed at the size limit")
+			}
+		})
 	}
 }
