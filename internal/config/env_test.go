@@ -18,7 +18,8 @@ func TestConfigDocumentation(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := slices.DeleteFunc(recorder.Keys(), func(key string) bool {
-		return key == "TRUSTED_PROXIES" // Refused legacy name.
+		// Refused names: read only to reject them, so deliberately undocumented.
+		return key == "TRUSTED_PROXIES" || key == "FNB_PASSWORD"
 	})
 	documented := slices.DeleteFunc(envtest.EnvExample(t, "../../.env.example"), func(key string) bool {
 		return key == "BUDGET_HOST" // Used by Compose for routing and interpolation.
