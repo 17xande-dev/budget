@@ -71,9 +71,13 @@ func TestDefaults(t *testing.T) {
 
 // A typo must not quietly mean "insecure".
 func TestCookieSecureIsStrict(t *testing.T) {
-	t.Setenv("COOKIE_SECURE", "ture")
-	if _, err := Load(); err == nil {
-		t.Fatal("COOKIE_SECURE=ture was accepted")
+	for _, invalid := range []string{"ture", "1", "TRUE"} {
+		t.Run(invalid, func(t *testing.T) {
+			t.Setenv("COOKIE_SECURE", invalid)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COOKIE_SECURE") {
+				t.Fatal("expected a refusal naming COOKIE_SECURE")
+			}
+		})
 	}
 	t.Setenv("COOKIE_SECURE", "false")
 	if c, err := Load(); err != nil || c.CookieSecure {
@@ -91,13 +95,13 @@ func TestBadSessionTTL(t *testing.T) {
 func TestShortSetupTokenIgnored(t *testing.T) {
 	t.Setenv("SETUP_TOKEN", "short")
 	c, _ := Load()
-	if c.SetupToken != "" {
+	if c.SetupToken.IsSet() {
 		t.Error("a short SETUP_TOKEN was kept")
 	}
 	t.Setenv("SETUP_TOKEN", "  "+strings.Repeat("x", MinSetupTokenLength)+"\n")
 	c, _ = Load()
-	if c.SetupToken != strings.Repeat("x", MinSetupTokenLength) {
-		t.Errorf("a long SETUP_TOKEN was not kept trimmed: %q", c.SetupToken)
+	if c.SetupToken.Reveal() != strings.Repeat("x", MinSetupTokenLength) {
+		t.Error("a long SETUP_TOKEN was not kept trimmed")
 	}
 }
 
@@ -159,14 +163,18 @@ func TestFNB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.FNB.Password != "hunter2-not-really" || c.FNB.Hour != 5 || c.FNB.Minute != 30 || len(c.FNB.Products) != 2 {
+	if c.FNB.Password.Reveal() != "hunter2-not-really" || c.FNB.Hour != 5 || c.FNB.Minute != 30 || len(c.FNB.Products) != 2 {
 		t.Errorf("fnb config: %+v", c.FNB)
 	}
 
 	// A password in a plain environment variable is refused, not used.
 	t.Setenv("FNB_PASSWORD", "plain")
-	if _, err := Load(); err == nil {
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FNB_PASSWORD:") {
 		t.Error("FNB_PASSWORD was accepted")
+	}
+	t.Setenv("FNB_PASSWORD_FILE", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FNB_PASSWORD:") {
+		t.Error("FNB_PASSWORD without a file was accepted")
 	}
 	t.Setenv("FNB_PASSWORD", "")
 
@@ -229,7 +237,7 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.FNB.Password != tc.want {
+			if c.FNB.Password.Reveal() != tc.want {
 				t.Error("FNB password did not match the expected bytes")
 			}
 		})
@@ -294,7 +302,7 @@ func TestFNBPasswordFileStripsOnlyTrailingCRLFAndRefusesBadFiles(t *testing.T) {
 				w.Close()
 			}
 		}()
-		if err := loadFIFO("someone", fifo); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		if err := loadFIFO("someone", fifo); err == nil || !strings.Contains(err.Error(), "must name a regular file") {
 			t.Errorf("fifo with a writer: %v", err)
 		}
 	}
@@ -308,7 +316,7 @@ func TestFNBPasswordFileSizeLimit(t *testing.T) {
 		want string
 	}{
 		{name: "exactly 64 KiB", size: 64 << 10},
-		{name: "64 KiB plus one", size: 64<<10 + 1, want: "config: FNB_PASSWORD_FILE: file is larger than 64 KiB"},
+		{name: "64 KiB plus one", size: 64<<10 + 1, want: "FNB_PASSWORD_FILE: secret file exceeds 64 KiB"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "secret")
@@ -327,7 +335,7 @@ func TestFNBPasswordFileSizeLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.FNB.Password != password {
+			if c.FNB.Password.Reveal() != password {
 				t.Error("password bytes changed at the size limit")
 			}
 		})

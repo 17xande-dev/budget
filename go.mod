@@ -3,6 +3,7 @@ module github.com/17xande-dev/budget
 go 1.27.4
 
 require (
+	github.com/17xande-dev/env v0.1.0
 	github.com/17xande-dev/password v0.1.0
 	github.com/17xande-dev/ratelimit v0.2.0
 	github.com/17xande-dev/sqlitekit v0.2.0

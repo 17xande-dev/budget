@@ -4,17 +4,15 @@ package config
 
 import (
 	"errors"
-	"fmt"
-	"io"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/17xande-dev/env"
 	"github.com/17xande-dev/ratelimit/clientip"
 )
 
@@ -57,7 +55,7 @@ type Config struct {
 	// SetupToken supplies the one-time token that claims the first account, for a
 	// deploy that cannot conveniently read the token otherwise printed on first
 	// boot. Empty -- the normal case -- means one is generated and logged.
-	SetupToken string
+	SetupToken env.Secret
 }
 
 // FNB configures the automated fetch.
@@ -66,7 +64,7 @@ type FNB struct {
 	// Password is read from the file FNB_PASSWORD_FILE names (a docker secret),
 	// never from a plain environment variable: those end up in `docker inspect`,
 	// in process listings and in crash dumps.
-	Password string
+	Password env.Secret
 	// Profile is the exact name of the profile to choose when the login is
 	// linked to several (FNB's "Linked Profiles" page).
 	Profile string
@@ -83,70 +81,68 @@ type FNB struct {
 // is worse than none: whoever set it believes it protects them.
 const MinSetupTokenLength = 32
 
-func Load() (Config, error) {
+func Load() (Config, error) { return load(os.LookupEnv) }
+
+func load(lookup env.Lookup) (Config, error) {
+	plainPassword, _ := lookup("FNB_PASSWORD")
+	r := env.New(func(key string) (string, bool) {
+		// Never let the generic reader accept a password from the environment.
+		if key == "FNB_PASSWORD" {
+			return "", false
+		}
+		value, ok := lookup(key)
+		if key == "SETUP_TOKEN" {
+			value = strings.TrimSpace(value)
+		}
+		return value, ok
+	})
 	c := Config{
-		Port:       getenv("PORT", "8080"),
-		DBPath:     getenv("DB_PATH", "data/budget.db"),
-		SetupToken: strings.TrimSpace(os.Getenv("SETUP_TOKEN")),
+		Port:         r.String("PORT", "8080"),
+		DBPath:       r.String("DB_PATH", "data/budget.db"),
+		SetupToken:   r.Secret("SETUP_TOKEN"),
+		CookieSecure: r.Bool("COOKIE_SECURE", true),
+		SessionTTL:   r.Duration("SESSION_TTL", 30*24*time.Hour, time.Nanosecond, 0),
 	}
 
 	// Refused rather than ignored: the old setting trusted forwarding headers from
 	// a CIDR list, and silently dropping it would leave a deployment that set it
 	// believing it still had per-client limits.
-	if _, ok := os.LookupEnv("TRUSTED_PROXIES"); ok {
-		return Config{}, errors.New("config: TRUSTED_PROXIES has been replaced by CLIENT_IP_SOURCE " +
+	if _, ok := lookup("TRUSTED_PROXIES"); ok {
+		r.Fail("TRUSTED_PROXIES", "has been replaced by CLIENT_IP_SOURCE "+
 			"(remote, forwarded or cloudflare); unset it, and set CLIENT_IP_SOURCE=cloudflare only behind the Cloudflare tunnel")
 	}
-	src, err := clientip.ParseSource(getenv("CLIENT_IP_SOURCE", "remote"))
+	src, err := clientip.ParseSource(r.String("CLIENT_IP_SOURCE", "remote"))
 	if err != nil {
-		return Config{}, fmt.Errorf("config: CLIENT_IP_SOURCE: %w", err)
+		r.Fail("CLIENT_IP_SOURCE", "must be remote, forwarded or cloudflare")
 	}
 	c.ClientIPSource = src
 
-	switch v := getenv("COOKIE_SECURE", "true"); v {
-	case "true":
-		c.CookieSecure = true
-	case "false":
-	default:
-		// Strict, because the permissive reading of a typo ("ture") is an
-		// insecure cookie on a deployment that meant to be https.
-		return Config{}, fmt.Errorf("config: COOKIE_SECURE must be true or false, got %q", v)
-	}
-
-	origin, err := publicOrigin(os.Getenv("PUBLIC_URL"), c.CookieSecure, c.Port)
+	origin, err := publicOrigin(r.String("PUBLIC_URL", ""), c.CookieSecure, c.Port)
 	if err != nil {
-		return Config{}, err
+		r.Fail("PUBLIC_URL", err.Error())
 	}
 	c.PublicOrigin = origin
 
 	// Beside the database by default, so the one volume holds both; that guards
 	// against a bad write or a mistaken delete, not a lost disk -- see README.
-	c.BackupDir = getenv("BACKUP_DIR", filepath.Join(filepath.Dir(c.DBPath), "backups"))
-	keep := getenv("BACKUP_KEEP", "14")
-	if n, err := strconv.Atoi(keep); err != nil || n < 0 {
-		return Config{}, fmt.Errorf("config: BACKUP_KEEP must be a whole number of days (0 for none), got %q", keep)
-	} else {
-		c.BackupKeep = n
+	c.BackupDir = r.String("BACKUP_DIR", filepath.Join(filepath.Dir(c.DBPath), "backups"))
+	c.BackupKeep = r.Int("BACKUP_KEEP", 14, 0, math.MaxInt)
+	if plainPassword != "" {
+		r.Fail("FNB_PASSWORD", "is not read; put the password in a file (a docker secret) and set FNB_PASSWORD_FILE to its path")
 	}
-
-	if err := loadFNB(&c.FNB); err != nil {
+	c.FNB = loadFNB(r)
+	if err := r.Err(); err != nil {
 		return Config{}, err
 	}
 
-	ttl, err := duration("SESSION_TTL", 30*24*time.Hour)
-	if err != nil {
-		return Config{}, err
-	}
-	c.SessionTTL = ttl
-
-	if c.SetupToken != "" && len(c.SetupToken) < MinSetupTokenLength {
+	if length := len(c.SetupToken.Reveal()); c.SetupToken.IsSet() && length < MinSetupTokenLength {
 		// Discarded rather than fatal: a generated token is printed instead, so
 		// the deployment is still claimable by whoever can read the log -- the
 		// safe direction. Loud, so nobody goes on believing theirs is in force.
 		log.Printf("SETUP_TOKEN is %d characters, want at least %d; ignoring it and issuing a "+
 			"generated token instead (make one with `openssl rand -base64 32`)",
-			len(c.SetupToken), MinSetupTokenLength)
-		c.SetupToken = ""
+			length, MinSetupTokenLength)
+		c.SetupToken = env.Secret{}
 	}
 	return c, nil
 }
@@ -159,22 +155,21 @@ func publicOrigin(raw string, secure bool, port string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		if secure {
-			return "", errors.New("config: PUBLIC_URL is required while COOKIE_SECURE is true: " +
-				"set it to the address browsers use, e.g. https://budget.example.com")
+			return "", errors.New("is required while COOKIE_SECURE is true; set it to the address browsers use")
 		}
 		return "http://localhost:" + port, nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("config: PUBLIC_URL: %w", err)
+		return "", errors.New("must be a bare HTTP or HTTPS origin")
 	}
 	scheme, host := strings.ToLower(u.Scheme), strings.ToLower(u.Host)
 	switch {
 	case scheme != "http" && scheme != "https", host == "", u.User != nil,
 		(u.Path != "" && u.Path != "/"), u.RawQuery != "", u.Fragment != "", u.Opaque != "":
-		return "", fmt.Errorf("config: PUBLIC_URL must be a bare origin such as https://budget.example.com, got %q", raw)
+		return "", errors.New("must be a bare HTTP or HTTPS origin")
 	case secure && scheme != "https":
-		return "", fmt.Errorf("config: PUBLIC_URL must be https while COOKIE_SECURE is true, got %q", raw)
+		return "", errors.New("must use HTTPS while COOKIE_SECURE is true")
 	}
 	if p := u.Port(); (scheme == "https" && p == "443") || (scheme == "http" && p == "80") {
 		host = strings.TrimSuffix(host, ":"+p)
@@ -182,95 +177,22 @@ func publicOrigin(raw string, secure bool, port string) (string, error) {
 	return scheme + "://" + host, nil
 }
 
-func loadFNB(f *FNB) error {
-	f.Username = strings.TrimSpace(os.Getenv("FNB_USERNAME"))
-	f.Profile = strings.TrimSpace(os.Getenv("FNB_PROFILE"))
-	f.ChromeURL = getenv("CHROME_URL", "ws://chrome:9222/")
-	f.Products = parseList(getenv("FNB_PRODUCTS", "DDA,ZFN"))
-	if os.Getenv("FNB_PASSWORD") != "" {
-		return fmt.Errorf("config: FNB_PASSWORD is not read -- put the password in a file (a docker secret) and set FNB_PASSWORD_FILE to its path")
+func loadFNB(r *env.Reader) FNB {
+	f := FNB{
+		Username:  strings.TrimSpace(r.String("FNB_USERNAME", "")),
+		Profile:   strings.TrimSpace(r.String("FNB_PROFILE", "")),
+		ChromeURL: r.String("CHROME_URL", "ws://chrome:9222/"),
+		Products:  r.List("FNB_PRODUCTS", []string{"DDA", "ZFN"}),
+		Password:  r.Secret("FNB_PASSWORD"),
 	}
-	if path := os.Getenv("FNB_PASSWORD_FILE"); path != "" {
-		pw, err := readSecretFile(path)
-		if err != nil {
-			return fmt.Errorf("config: FNB_PASSWORD_FILE: %w", err)
-		}
-		f.Password = pw
-	}
-	if (f.Username == "") != (f.Password == "") {
+	if (f.Username != "") != (r.String("FNB_PASSWORD_FILE", "") != "") {
 		// Half-configured is the case to catch at startup, not at 06:00.
-		return fmt.Errorf("config: FNB_USERNAME and FNB_PASSWORD_FILE must be set together")
+		r.Fail("FNB_USERNAME", "must be set together with FNB_PASSWORD_FILE")
 	}
-	at := getenv("FETCH_AT", "06:00")
-	t, err := time.Parse("15:04", at)
+	t, err := time.Parse("15:04", r.String("FETCH_AT", "06:00"))
 	if err != nil {
-		return fmt.Errorf("config: FETCH_AT must be HH:MM, got %q", at)
+		r.Fail("FETCH_AT", "must be HH:MM")
 	}
 	f.Hour, f.Minute = t.Hour(), t.Minute()
-	return nil
-}
-
-// maxSecretFile bounds a secret file: a real secret is tiny.
-const maxSecretFile = 64 << 10
-
-// readSecretFile strips all trailing CR and LF bytes so extra line endings
-// aren't part of the password, while spaces and other bytes are preserved.
-// Errors are fixed messages: an *os.PathError would carry the path, and
-// operators sometimes paste the password into the path variable.
-func readSecretFile(path string) (string, error) {
-	// O_NONBLOCK so a FIFO with no writer cannot hang startup; the type check on
-	// the opened descriptor (not the name) then refuses it.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return "", errors.New("cannot open the file")
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return "", errors.New("cannot read the file")
-	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("not a regular file")
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxSecretFile+1))
-	if err != nil {
-		return "", errors.New("cannot read the file")
-	}
-	if len(raw) > maxSecretFile {
-		return "", errors.New("file is larger than 64 KiB")
-	}
-	v := strings.TrimRight(string(raw), "\r\n")
-	if v == "" {
-		return "", errors.New("file is empty")
-	}
-	return v, nil
-}
-
-func duration(key string, def time.Duration) (time.Duration, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("config: %s must be a positive duration like 720h, got %q", key, v)
-	}
-	return d, nil
-}
-
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func parseList(s string) []string {
-	var out []string
-	for v := range strings.SplitSeq(s, ",") {
-		if v = strings.TrimSpace(v); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
+	return f
 }

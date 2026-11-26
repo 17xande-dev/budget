@@ -90,13 +90,13 @@ func serve(cfg config.Config) error {
 	defer database.Close()
 
 	users := auth.NewStore(database)
-	if err := ensureSetupToken(users, cfg.SetupToken, log.Default()); err != nil {
+	if err := ensureSetupToken(users, cfg.SetupToken.Reveal(), log.Default()); err != nil {
 		return fmt.Errorf("setup token: %w", err)
 	}
 
 	led, bud := ledger.NewStore(database), budget.NewStore(database)
 	fetcher := fetch.New(database, fnb.Chrome{URL: cfg.FNB.ChromeURL}, led, bud, fetch.Config{
-		Creds:    fnb.Credentials{Username: cfg.FNB.Username, Password: cfg.FNB.Password, Profile: cfg.FNB.Profile},
+		Creds:    fnb.Credentials{Username: cfg.FNB.Username, Password: cfg.FNB.Password.Reveal(), Profile: cfg.FNB.Profile},
 		Products: cfg.FNB.Products,
 		Hour:     cfg.FNB.Hour,
 		Minute:   cfg.FNB.Minute,
