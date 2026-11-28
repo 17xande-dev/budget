@@ -53,6 +53,13 @@ shared Cloudflare tunnel) is done by `~/dev/17xande.dev/infra`.
 - **Deploy:** `make deploy` runs the test gate, then `kamal deploy`: it builds the
   image locally, pushes it to `ghcr.io/17xande-dev/budget` and swaps it in once
   `/health` passes. It logs in to ghcr.io with `gh auth token` (`.kamal/secrets`).
+- **Check the configuration:** `budget -check-config` loads every setting (including
+  the `*_FILE` secrets) and runs the startup checks that need no database or network.
+  It prints every problem by setting name, never a value, then exits 1; with none it
+  prints `config: ok` and exits 0. It opens no database and starts nothing, so it is
+  a safe rehearsal: `docker run --rm --network none --read-only --env-file <env>
+  [-v <secrets>:ro] <image> -check-config` (the image's entrypoint is the binary;
+  do not repeat its name). Locally: `make check-config`.
 - **Roll back:** `kamal rollback <version>` (`kamal app details` lists versions).
   If migration 0002 has run and the target image only knows 0001, undo 0002
   before rolling back. The old image refuses the migrated database, and Budget

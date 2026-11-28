@@ -44,6 +44,10 @@ test: bundle
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+## check-config: validate the configuration from the environment, opening nothing
+check-config:
+	go run . -check-config
+
 ## gate: run the full local test gate
 gate: test
 
@@ -91,4 +95,4 @@ up:
 logs:
 	docker compose logs -f budget
 
-.PHONY: help bundle run build test gate vulncheck fmt tidy reset-password recreate-db image up logs deploy logs-prod
+.PHONY: help bundle run build test gate check-config vulncheck fmt tidy reset-password recreate-db image up logs deploy logs-prod

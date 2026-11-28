@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -42,27 +44,81 @@ var version = "dev"
 const shutdownDrain = 15 * time.Second
 
 func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run is main with its streams and exit status passed in, so tests can drive the
+// real flag handling.
+func run(args []string, stdout, stderr io.Writer) int {
 	// The per-IP limiter admits a burst; ten parallel Argon2id logins measured
 	// about 650 MiB against a 512 MiB container. Cap both the server and the
 	// reset-password command at two concurrent hashes; excess callers wait.
 	password.SetConcurrency(2)
 
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatal(err)
+	fs := flag.NewFlagSet("budget", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	check := fs.Bool("check-config", false, "validate the full server configuration and exit")
+	if err := fs.Parse(args); err != nil {
+		return 2
 	}
 
-	if len(os.Args) > 1 {
-		if err := runCommand(cfg, os.Args[1:]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+	cfg, err := config.Load()
+	if err != nil {
+		if *check {
+			fmt.Fprintln(stderr, err)
+		} else {
+			log.Print(err)
 		}
-		return
+		return 1
+	}
+
+	// Checked before any subcommand, so a mode flag never skips the check. It
+	// must open nothing: no database, no listener, no loop.
+	if *check {
+		if err := validateConfig(cfg); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "config: ok")
+		return 0
+	}
+
+	if rest := fs.Args(); len(rest) > 0 {
+		if err := runCommand(cfg, rest); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	}
 
 	if err := serve(cfg); err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		return 1
 	}
+	return 0
+}
+
+// validateConfig runs the checks serve makes after config.Load that need no
+// database and no network, so -check-config refuses exactly what the server
+// would refuse at startup. Stores are nil: handler.New only keeps them.
+func validateConfig(cfg config.Config) error {
+	var problems []error
+	if err := auth.Lifetime(cfg.SessionTTL).Validate(); err != nil {
+		problems = append(problems, fmt.Errorf("SESSION_TTL: session lifetime: %w", err))
+	}
+	if _, err := handler.New(nil, nil, nil, handler.Config{
+		Backups:        backups(cfg),
+		PublicOrigin:   cfg.PublicOrigin,
+		CookieSecure:   cfg.CookieSecure,
+		SessionTTL:     cfg.SessionTTL,
+		ClientIPSource: cfg.ClientIPSource,
+	}); err != nil {
+		problems = append(problems, fmt.Errorf("init handler: %w", err))
+	}
+	if _, err := newSecretLimit(cfg.ClientIPSource); err != nil {
+		problems = append(problems, fmt.Errorf("init rate limit: %w", err))
+	}
+	return errors.Join(problems...)
 }
 
 // runCommand runs an operator subcommand. These exist as subcommands of the one
@@ -87,6 +143,10 @@ func runCommand(cfg config.Config, args []string) error {
 }
 
 func serve(cfg config.Config) error {
+	// The same checks -check-config runs, before the database is opened.
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
