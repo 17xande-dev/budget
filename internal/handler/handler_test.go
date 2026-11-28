@@ -580,7 +580,7 @@ func TestNoInlineStylesOrHandlers(t *testing.T) {
 
 var assetRe = regexp.MustCompile(`(?:href|src)="(/static/[^"]+)"`)
 
-func TestStaticAssets(t *testing.T) {
+func TestStaticCacheOnlyForTheMatchingVersion(t *testing.T) {
 	e := newEnv(t)
 	b := e.browser()
 	page := b.get("/setup").body
@@ -589,12 +589,38 @@ func TestStaticAssets(t *testing.T) {
 		t.Fatalf("expected stylesheet, htmx and app.js on the page, found %d", len(urls))
 	}
 	for _, m := range urls {
-		r := b.get(m[1])
-		if r.code != 200 || !strings.Contains(r.hdr.Get("Cache-Control"), "immutable") {
-			t.Errorf("%s: %d cache=%q", m[1], r.code, r.hdr.Get("Cache-Control"))
-		}
 		if strings.Contains(m[1], "/missing/") {
 			t.Errorf("page references a missing asset: %s", m[1])
+		}
+		bare, _, ok := strings.Cut(m[1], "?v=")
+		if !ok {
+			t.Fatalf("page references an unversioned asset: %s", m[1])
+		}
+		for _, tc := range []struct {
+			name, path, cache string
+		}{
+			{"matching", m[1], "public, max-age=31536000, immutable"},
+			{"bare", bare, "no-cache"},
+			{"wrong", bare + "?v=wrong", "no-cache"},
+			{"duplicate", m[1] + "&v=wrong", "no-cache"},
+		} {
+			t.Run(bare+"/"+tc.name, func(t *testing.T) {
+				c := b.c.With(t)
+				r := c.Get(tc.path)
+				if r.Status != http.StatusOK || r.Header.Get("Cache-Control") != tc.cache {
+					t.Fatalf("status = %d, cache = %q; want 200, %q", r.Status, r.Header.Get("Cache-Control"), tc.cache)
+				}
+				etag := r.Header.Get("ETag")
+				if etag == "" {
+					t.Fatal("missing ETag")
+				}
+				req := httptest.NewRequest(http.MethodGet, e.srv.URL+tc.path, nil)
+				req.Header.Set("If-None-Match", etag)
+				r = c.Do(req)
+				if r.Status != http.StatusNotModified {
+					t.Errorf("conditional GET status = %d; want 304", r.Status)
+				}
+			})
 		}
 	}
 	// Embedded but deliberately unserved.

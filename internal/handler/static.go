@@ -45,6 +45,7 @@ var requiredAssets = []string{"styles.css", "htmx.min.js", "dist/app.js"}
 type staticAsset struct {
 	body        []byte
 	contentType string
+	digest      string
 	etag        string
 	url         string
 }
@@ -78,6 +79,7 @@ func loadAssets() (map[string]staticAsset, error) {
 		out[name] = staticAsset{
 			body:        body,
 			contentType: contentType,
+			digest:      digest,
 			etag:        `"` + digest + `"`,
 			url:         middleware.StaticPrefix + name + "?v=" + digest,
 		}
@@ -116,6 +118,12 @@ func (h *Handler) ServeStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", a.contentType)
 	w.Header().Set("ETag", a.etag)
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	versions := r.URL.Query()["v"]
+	// Only a URL naming these exact bytes can be cached without revalidation.
+	cache := "no-cache"
+	if len(versions) == 1 && versions[0] == a.digest {
+		cache = "public, max-age=31536000, immutable"
+	}
+	w.Header().Set("Cache-Control", cache)
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(a.body))
 }
