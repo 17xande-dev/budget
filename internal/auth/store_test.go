@@ -163,7 +163,7 @@ func TestSessions(t *testing.T) {
 		t.Error("unknown token accepted")
 	}
 
-	n, err := s.DeleteExpiredSessions(t0.Add(2 * time.Hour))
+	n, err := s.DeleteExpiredSessions(t.Context(), t0.Add(2*time.Hour))
 	if err != nil || n != 1 {
 		t.Errorf("sweep: n=%d err=%v, want 1", n, err)
 	}

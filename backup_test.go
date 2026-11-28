@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,20 +34,21 @@ func TestBackupsFollowTheConfig(t *testing.T) {
 
 // The loop is what makes a backup happen at all: it must call Run at startup (not
 // an hour later) and the file it makes is the one the settings page lists.
-func TestBackupDailyRunsAtStartup(t *testing.T) {
-	d, err := db.Open(filepath.Join(t.TempDir(), "loop.db"))
+func TestBackupsRunAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{DBPath: filepath.Join(dir, "loop.db"), BackupDir: filepath.Join(dir, "backups"), BackupKeep: 3}
+	d, err := db.Open(cfg.DBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	b := backups(config.Config{BackupDir: filepath.Join(t.TempDir(), "backups"), BackupKeep: 3})
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		backupDaily(ctx, d, *b, time.Hour)
-		close(done)
-	}()
+	b := backups(cfg)
+	firstDay := time.Now().In(sast).Format(b.Layout)
+	loop, err := startBackups(t.Context(), d, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loop.Stop()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		files, err := b.List()
@@ -55,17 +56,26 @@ func TestBackupDailyRunsAtStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(files) == 1 {
-			want := "budget-" + time.Now().In(sast).Format("2006-01-02") + ".db"
-			if files[0].Name != want {
-				t.Errorf("backup %q, want %q", files[0].Name, want)
+			lastDay := time.Now().In(sast).Format(b.Layout)
+			if files[0].Name != b.Prefix+firstDay+".db" && files[0].Name != b.Prefix+lastDay+".db" {
+				t.Errorf("backup %q, want today's SAST date", files[0].Name)
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("backupDaily made no backup at startup")
+			t.Fatal("scheduled backups made no backup at startup")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	cancel()
-	<-done
+	loop.Stop()
+	if _, err := os.Stat(cfg.DBPath + ".backup-lock"); err != nil {
+		t.Errorf("backup lock: %v", err)
+	}
+}
+
+func TestBackupsOffDoesNotStartLoop(t *testing.T) {
+	loop, err := startBackups(t.Context(), nil, config.Config{BackupKeep: 0})
+	if loop != nil || err != nil {
+		t.Fatalf("startBackups = %v, %v; want nil loop and no error", loop, err)
+	}
 }

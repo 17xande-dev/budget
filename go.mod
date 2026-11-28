@@ -6,7 +6,7 @@ require (
 	github.com/17xande-dev/env v0.1.0
 	github.com/17xande-dev/password v0.1.0
 	github.com/17xande-dev/ratelimit v0.2.0
-	github.com/17xande-dev/sqlitekit v0.2.0
+	github.com/17xande-dev/sqlitekit v0.4.0
 	github.com/17xande-dev/websec v0.5.0
 	github.com/chromedp/cdproto v0.160.5
 	github.com/chromedp/chromedp v0.24.0

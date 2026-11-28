@@ -93,7 +93,7 @@ func TestSessionStoreConformance(t *testing.T) {
 		},
 		Sweep: func(t *testing.T) int {
 			t.Helper()
-			n, err := s.DeleteExpiredSessions(time.Now())
+			n, err := s.DeleteExpiredSessions(t.Context(), time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,6 +4,10 @@
 # the shared Cloudflare tunnel) lives in ~/dev/17xande.dev/infra.
 service: budget
 
+# Leave at least five seconds beyond the HTTP drain, loop joins and database close.
+# Behind kamal-proxy, Docker would otherwise stop the app after ten seconds.
+stop_timeout: 25
+
 image: 17xande-dev/budget
 
 registry:

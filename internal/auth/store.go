@@ -320,8 +320,8 @@ func (s *Store) DeleteSession(token string) error {
 // DeleteExpiredSessions removes sessions past their absolute end or unused for
 // the idle limit, and returns how many. Expiry is already enforced on read, so
 // this is housekeeping: without it the table grows for ever.
-func (s *Store) DeleteExpiredSessions(now time.Time) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?`, formatTime(now), formatTime(now.Add(-s.Life.Idle)))
+func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?`, formatTime(now), formatTime(now.Add(-s.Life.Idle)))
 	if err != nil {
 		return 0, fmt.Errorf("delete expired sessions: %w", err)
 	}

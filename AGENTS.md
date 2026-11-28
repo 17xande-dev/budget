@@ -69,7 +69,7 @@ docker build -t budget . && docker run --rm -p 127.0.0.1:18080:8080 -e COOKIE_SE
   and every download is built in a buffer before the first header: descriptions are
   merchant-written, and a streamed export that fails halfway still looks complete.
 - **Backups are `sqlitekit.Backups` (VACUUM INTO, temp file + rename), run by
-  `backupDaily` in backup.go.** The database is WAL: never copy the `.db` of a running
+  the sqlitekit loop started in backup.go.** The database is WAL: never copy the `.db` of a running
   app, a copy can be torn or miss the `-wal`.
 - **Never put real bank data in the repo.** Fixtures are synthetic; .gitignore
   blocks csv/ofx/zip outside testdata, but check what you add.

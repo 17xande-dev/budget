@@ -37,30 +37,22 @@ func backups(cfg config.Config) *sqlitekit.Backups {
 	}
 }
 
-// backupDaily makes the day's backup at startup and then checks every `every`, so a
-// server that was down at midnight still backs up the day it comes back. Run
-// skips a day already done, which makes the hourly check nearly free. It must be
-// the only caller of Run for its folder.
-func backupDaily(ctx context.Context, d *sql.DB, b sqlitekit.Backups, every time.Duration) {
-	run := func(now time.Time) {
-		path, made, err := b.Run(ctx, d, now)
-		switch {
-		case err != nil:
-			// Logged, and visible on the settings page as a backup going stale.
-			log.Printf("backup: %v", err)
-		case made:
-			log.Printf("backup: wrote %s", path)
-		}
+func startBackups(ctx context.Context, d *sql.DB, cfg config.Config) (*sqlitekit.BackupLoop, error) {
+	b := backups(cfg)
+	if b == nil {
+		log.Print("backups are off (BACKUP_KEEP=0)")
+		return nil, nil
 	}
-	run(time.Now())
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-t.C:
-			run(now)
-		}
-	}
+	return b.Start(ctx, d, sqlitekit.BackupSchedule{
+		LockPath: cfg.DBPath + ".backup-lock",
+		Report: func(result sqlitekit.BackupResult) {
+			switch {
+			case result.Err != nil:
+				// A stale backup is also visible on the settings page.
+				log.Printf("backup: %v", result.Err)
+			case result.Made:
+				log.Printf("backup: wrote %s", result.Path)
+			}
+		},
+	})
 }

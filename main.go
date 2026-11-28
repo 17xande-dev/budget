@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,12 +31,15 @@ import (
 	"github.com/17xande-dev/password"
 	"github.com/17xande-dev/ratelimit"
 	"github.com/17xande-dev/ratelimit/clientip"
+	"github.com/17xande-dev/sqlitekit"
 	"golang.org/x/time/rate"
 )
 
 // version is reported to MCP clients; set at build time with
 // -ldflags "-X main.version=...".
 var version = "dev"
+
+const shutdownDrain = 15 * time.Second
 
 func main() {
 	// The per-IP limiter admits a burst; ten parallel Argon2id logins measured
@@ -87,7 +91,10 @@ func serve(cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
-	defer database.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	var backupLoop *sqlitekit.BackupLoop
+	var sweeps sync.WaitGroup
+	defer func() { closeAfterLoops(stop, backupLoop, &sweeps, database.Close) }()
 
 	users := auth.NewStore(database)
 	if err := ensureSetupToken(users, cfg.SetupToken.Reveal(), log.Default()); err != nil {
@@ -134,18 +141,17 @@ func serve(cfg config.Config) error {
 
 	srv := newServer(":"+cfg.Port, app)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	backupLoop, err = startBackups(ctx, database, cfg)
+	if err != nil {
+		return fmt.Errorf("backups: %w", err)
+	}
 
 	// Expired sessions are already refused on read; this only keeps the table
 	// from growing for ever.
-	go sweepSessions(ctx, users, time.Hour)
+	sweeps.Go(func() { sweepSessions(ctx, users, time.Hour) })
+	// A bank fetch can take 30 seconds. Cancel its scheduler with ctx, but
+	// don't wait for a fetch to finish within the container stop window.
 	go fetcher.Schedule(ctx)
-	if b := backups(cfg); b != nil {
-		go backupDaily(ctx, database, *b, time.Hour)
-	} else {
-		log.Print("backups are off (BACKUP_KEEP=0)")
-	}
 
 	errc := make(chan error, 1)
 	go func() {
@@ -159,9 +165,19 @@ func serve(cfg config.Config) error {
 	case <-ctx.Done():
 	}
 	log.Print("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// config/deploy.yml allows 25 seconds for the HTTP drain, loop joins and
+	// database close, with at least five seconds to spare.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownDrain)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func closeAfterLoops(stop context.CancelFunc, backups *sqlitekit.BackupLoop, sweeps *sync.WaitGroup, closeDB func() error) {
+	// A listener failure can reach this defer without a signal cancelling ctx.
+	stop()
+	backups.Stop()
+	sweeps.Wait()
+	_ = closeDB()
 }
 
 // newServer is the http.Server with the app's timeouts and header limit.
@@ -187,7 +203,7 @@ func sweepSessions(ctx context.Context, store *auth.Store, every time.Duration) 
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if n, err := store.DeleteExpiredSessions(now); err != nil {
+			if n, err := store.DeleteExpiredSessions(ctx, now); err != nil && ctx.Err() == nil {
 				log.Printf("sweep sessions: %v", err)
 			} else if n > 0 {
 				log.Printf("swept %d expired session(s)", n)
